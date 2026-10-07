@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Residentes por vivienda · Rivas-Vaciamadrid</title>
+  <link rel="stylesheet" href="https://js.arcgis.com/4.33/esri/themes/light/main.css" />
+  <link rel="stylesheet" href="styles.css?v=56" />
+</head>
+<body>
+  <div id="viewDiv"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <h1>Residentes por vivienda</h1>
+    </div>
+
+    <div class="search" id="searchBox">
+      <input id="searchInput" type="search" placeholder="Ejemplo: Calle Beguinas 2" autocomplete="off" />
+      <ul id="searchList" class="search-list" hidden></ul>
+    </div>
+
+    <div class="stats" aria-label="Resumen del padrón">
+      <p><b id="statViviendas">—</b><span>Viviendas</span></p>
+      <p><b id="statResidentes">—</b><span>Residentes</span></p>
+      <p><b id="statParcelas">—</b><span>Parcelas</span></p>
+    </div>
+  </header>
+
+  <button id="btnArea" class="esri-widget esri-widget--button" type="button" title="Dibujar área" aria-label="Dibujar área">
+    <span class="esri-icon-polygon" aria-hidden="true"></span>
+  </button>
+  <button id="btnView" class="esri-widget esri-widget--button view-toggle" type="button" title="Vista 2D" aria-label="Vista 2D">2D</button>
+
+  <aside id="areaPanel" class="area-panel" hidden>
+    <div class="area-head">
+      <p class="legend-title">Área seleccionada</p>
+      <div class="area-actions">
+        <button id="btnClearArea" class="area-clear" type="button">Borrar</button>
+      </div>
+    </div>
+    <dl>
+      <div>
+        <dt>Residentes</dt>
+        <dd id="areaResidentes">—</dd>
+      </div>
+      <div>
+        <dt>Viviendas unifamiliares</dt>
+        <dd id="areaUni">—</dd>
+      </div>
+      <div>
+        <dt>Viviendas plurifamiliares</dt>
+        <dd id="areaPluri">—</dd>
+      </div>
+    </dl>
+    <p id="areaHint" class="hint">Clic en el mapa para los vértices. Doble clic en el primero para cerrar.</p>
+  </aside>
+
+  <aside class="legend" aria-label="Leyenda">
+    <p class="legend-title">Unifamiliares</p>
+    <ul>
+      <li><i class="swatch s1"></i> 1</li>
+      <li><i class="swatch s2"></i> 2</li>
+      <li><i class="swatch s3"></i> 3</li>
+      <li><i class="swatch s4"></i> 4</li>
+      <li><i class="swatch s5"></i> 5 o más</li>
+    </ul>
+    <p class="legend-block"><i class="swatch sblock"></i> Plurifamiliar · total del bloque</p>
+    <p class="legend-block"><i class="swatch sinc"></i> Incidencia · sin portal</p>
+  </aside>
+
+  <div id="loading" class="loading">
+    <p>Cargando escena y padrón…</p>
+  </div>
+
+  <script src="https://js.arcgis.com/4.33/"></script>
+  <script src="app.js?v=75"></script>
+</body>
+</html>
