@@ -4,7 +4,6 @@
 !/index.html
 !/app.js
 !/styles.css
-!/server.py
 !/data/viviendas.geojson
 !/data/meta.json
 !/data/limite.json
