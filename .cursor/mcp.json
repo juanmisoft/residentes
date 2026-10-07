@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "residentes-rivas": {
+      "command": "python",
+      "args": ["mcp_residentes.py"]
+    }
+  }
+}
