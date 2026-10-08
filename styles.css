@@ -48,11 +48,13 @@ html, body, #viewDiv {
   min-width: 0;
 }
 
-.brand-mark {
-  width: 12px;
-  height: 28px;
-  border-radius: 4px;
-  background: var(--accent);
+.brand-logo {
+  height: 36px;
+  width: auto;
+  max-width: 220px;
+  object-fit: contain;
+  flex: 0 0 auto;
+  display: block;
 }
 
 .brand h1 {
@@ -450,6 +452,15 @@ html, body, #viewDiv {
   box-shadow: 0 16px 40px rgba(20, 32, 48, 0.22);
 }
 
+.intro-logo {
+  display: block;
+  height: 48px;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+  margin: 0 0 14px;
+}
+
 .intro-card h2 {
   margin: 0 0 8px;
   font-size: 20px;
@@ -535,7 +546,9 @@ html, body, #viewDiv {
     padding: 10px 12px;
   }
   .brand { grid-area: brand; }
+  .brand-logo { height: 30px; max-width: 160px; }
   .brand h1 { font-size: 13px; white-space: normal; line-height: 1.2; }
+  .intro-logo { height: 40px; }
   .stats {
     grid-area: stats;
     gap: 10px;
@@ -568,6 +581,14 @@ html, body, #viewDiv {
     max-width: calc(100vw - 16px) !important;
     width: calc(100vw - 16px) !important;
   }
+  .esri-view .esri-popup {
+    z-index: 6;
+  }
+  body.popup-open .legend,
+  body.popup-open .area-panel {
+    visibility: hidden;
+    pointer-events: none;
+  }
   .floors { max-height: 36vh; }
   .breakdown { max-height: 28vh; }
   .intro-card { padding: 18px 16px 14px; }
@@ -589,6 +610,7 @@ html, body, #viewDiv {
   }
   .stats p { align-items: flex-start; }
   .brand h1 { font-size: 14px; }
+  .brand-logo { height: 28px; max-width: 140px; }
   .legend {
     width: auto;
     max-width: calc(100% - 64px);
