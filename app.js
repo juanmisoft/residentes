@@ -76,6 +76,7 @@ require([
   let savedCamera = null;
   let viewHandles = [];
   let switching = false;
+  let popupVisibleHandle = null;
   let uniRenderer3d = null;
   let uniRenderer2d = null;
   let pluriRenderer3d = null;
@@ -618,6 +619,7 @@ require([
     view.popup.autoCloseEnabled = false;
     mountChrome();
     bindView();
+    watchPopup();
     applyViewStyle();
     view.when(function () {
       if (view.type === "3d" && clipExtent) view.clippingArea = clipExtent.clone();
@@ -629,6 +631,7 @@ require([
       filterParcelas();
       refreshLabels();
       syncLayout();
+      setPopupOpen(view.popup && view.popup.visible);
       switching = false;
     }).catch(function (err) {
       switching = false;
@@ -638,6 +641,7 @@ require([
 
   mountChrome();
   bindView();
+  watchPopup();
   applyViewStyle();
   btnView.addEventListener("click", function () {
     setMode(view.type === "3d" ? "2d" : "3d");
@@ -1176,12 +1180,33 @@ require([
     );
   }
 
+  function setPopupOpen(open) {
+    document.body.classList.toggle("popup-open", !!open);
+  }
+
   function openPopup(mapPoint, title, html) {
     view.openPopup({
       location: mapPoint,
       title: title,
       content: html
     });
+    setPopupOpen(true);
+  }
+
+  function watchPopup() {
+    if (popupVisibleHandle) {
+      popupVisibleHandle.remove();
+      popupVisibleHandle = null;
+    }
+    if (!view || !view.popup || typeof view.popup.watch !== "function") return;
+    try {
+      popupVisibleHandle = view.popup.watch("visible", function (visible) {
+        setPopupOpen(!!visible);
+      });
+      setPopupOpen(!!view.popup.visible);
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   function pointLayers() {
