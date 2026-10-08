@@ -628,6 +628,7 @@ require([
       else if (homeExtent) homeWidget.viewpoint = new Viewpoint({ targetGeometry: homeExtent.clone() });
       filterParcelas();
       refreshLabels();
+      syncLayout();
       switching = false;
     }).catch(function (err) {
       switching = false;
@@ -1743,9 +1744,73 @@ require([
     });
   }).then(function () {
     document.getElementById("loading").classList.add("hidden");
+    syncLayout();
+    maybeShowIntro();
   }).catch(function (error) {
     console.error(error);
     document.querySelector("#loading p").textContent =
       "No se ha podido cargar el visor. Recarga la página.";
+  });
+
+  const INTRO_KEY = "residentes-intro-hide";
+  const introOverlay = document.getElementById("introOverlay");
+  const introHide = document.getElementById("introHide");
+  const btnIntroClose = document.getElementById("btnIntroClose");
+  const btnHelp = document.getElementById("btnHelp");
+
+  function showIntro() {
+    introHide.checked = false;
+    introOverlay.hidden = false;
+  }
+
+  function hideIntro() {
+    if (introHide.checked) {
+      try { localStorage.setItem(INTRO_KEY, "1"); } catch (err) {}
+    }
+    introOverlay.hidden = true;
+  }
+
+  function maybeShowIntro() {
+    let skip = false;
+    try { skip = localStorage.getItem(INTRO_KEY) === "1"; } catch (err) {}
+    if (!skip) showIntro();
+  }
+
+  btnIntroClose.addEventListener("click", hideIntro);
+  btnHelp.addEventListener("click", showIntro);
+  introOverlay.addEventListener("click", function (event) {
+    if (event.target === introOverlay) hideIntro();
+  });
+
+  function layoutPadding() {
+    const bar = document.querySelector(".topbar");
+    const height = bar ? Math.ceil(bar.getBoundingClientRect().bottom) + 8 : 76;
+    const narrow = window.matchMedia("(max-width: 980px)").matches;
+    return {
+      top: height,
+      right: narrow ? 8 : 12,
+      bottom: narrow ? 8 : 12,
+      left: narrow ? 8 : 12
+    };
+  }
+
+  function applyPopupLayout() {
+    const narrow = window.matchMedia("(max-width: 980px)").matches;
+    view.popup.dockEnabled = narrow;
+    view.popup.dockOptions = {
+      buttonEnabled: false,
+      breakpoint: false,
+      position: "bottom-center"
+    };
+  }
+
+  function syncLayout() {
+    if (!view || !view.ui) return;
+    view.padding = layoutPadding();
+    applyPopupLayout();
+  }
+
+  window.addEventListener("resize", function () {
+    syncLayout();
   });
 });

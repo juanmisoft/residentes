@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Residentes por vivienda · Rivas-Vaciamadrid</title>
   <link rel="stylesheet" href="https://js.arcgis.com/4.33/esri/themes/light/main.css" />
-  <link rel="stylesheet" href="styles.css?v=56" />
+  <link rel="stylesheet" href="styles.css?v=58" />
 </head>
 <body>
   <div id="viewDiv"></div>
@@ -14,10 +14,11 @@
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"></span>
       <h1>Residentes por vivienda</h1>
+      <button id="btnHelp" class="help-btn" type="button" title="Cómo usar el mapa" aria-label="Cómo usar el mapa">?</button>
     </div>
 
     <div class="search" id="searchBox">
-      <input id="searchInput" type="search" placeholder="Ejemplo: Calle Beguinas 2" autocomplete="off" />
+      <input id="searchInput" type="search" placeholder="Ejemplo: Calle Beguinas 2" autocomplete="off" enterkeyhint="search" />
       <ul id="searchList" class="search-list" hidden></ul>
     </div>
 
@@ -74,7 +75,27 @@
     <p>Cargando escena y padrón…</p>
   </div>
 
+  <div id="introOverlay" class="intro-overlay" hidden>
+    <div class="intro-card" role="dialog" aria-modal="true" aria-labelledby="introTitle">
+      <h2 id="introTitle">Cómo usar este mapa</h2>
+      <p class="intro-lead">Consulta cuántas personas viven en cada vivienda de Rivas-Vaciamadrid.</p>
+      <ul class="intro-list">
+        <li><strong>Buscar una dirección</strong> en la barra de arriba. Escribe la calle y el número.</li>
+        <li><strong>Tocar un punto</strong> del mapa: verás los residentes de esa vivienda o del bloque.</li>
+        <li><strong>Colores</strong> de las bolitas: de azul (1 residente) a rojo (5 o más).</li>
+        <li><strong>Cuadrado verde</strong>: bloque con varias viviendas. El rombo naranja marca una incidencia.</li>
+        <li><strong>Dibujar un área</strong> con el icono de polígono para sumar residentes y viviendas de esa zona.</li>
+        <li><strong>Cambiar a 2D o 3D</strong> y elegir el mapa base con los botones de la derecha.</li>
+      </ul>
+      <label class="intro-check">
+        <input id="introHide" type="checkbox" />
+        No volver a mostrar esta ventana
+      </label>
+      <button id="btnIntroClose" class="intro-btn" type="button">Empezar</button>
+    </div>
+  </div>
+
   <script src="https://js.arcgis.com/4.33/"></script>
-  <script src="app.js?v=75"></script>
+  <script src="app.js?v=76"></script>
 </body>
 </html>
