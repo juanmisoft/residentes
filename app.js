@@ -83,6 +83,8 @@ require([
   let pluriRenderer2d = null;
   let incRenderer3d = null;
   let incRenderer2d = null;
+  let selectedTarget = null;
+  let highlightHandle = null;
 
   const LIMITE_QUERY = "https://sit.rivasciudad.es/server/rest/services/Termino_municipal_actual/FeatureServer/0/query?where=1%3D1&outFields=NOMBRE&returnGeometry=true&outSR=4326&f=json";
 
@@ -179,12 +181,151 @@ require([
     return isNaN(n) ? 50 : n;
   }
 
+  function isUpperFloor(planta) {
+    const text = String(planta || "").trim();
+    if (!text || text === "Baja" || text === "Sin planta" || text === "Unifamiliar") return false;
+    if (text === "Sótano" || text.indexOf("Sótano") === 0) return false;
+    const n = parseInt(text, 10);
+    return !isNaN(n) && n >= 1;
+  }
+
+  function isGroundCommunity(features) {
+    if (!features || features.length < 2) return false;
+    for (let i = 0; i < features.length; i++) {
+      const planta = features[i].properties && features[i].properties.planta;
+      if (isUpperFloor(planta)) return false;
+    }
+    return true;
+  }
+
+  function looksLikeHouseNumbers(features) {
+    if (!features || features.length < 4) return false;
+    let numeric = 0;
+    features.forEach(function (feature) {
+      if (/^\d+$/.test(String((feature.properties && feature.properties.letra) || "").trim())) {
+        numeric += 1;
+      }
+    });
+    return numeric >= features.length * 0.6;
+  }
+
   function compareUnidad(a, b) {
     const byFloor = plantaOrder(a.planta) - plantaOrder(b.planta);
     if (byFloor) return byFloor;
     const byAddress = (a.direccion || "").localeCompare(b.direccion || "", "es");
     if (byAddress) return byAddress;
-    return (a.letra || "").localeCompare(b.letra || "", "es");
+    const byPortal = String(a.portal || "").localeCompare(String(b.portal || ""), "es", { numeric: true });
+    if (byPortal) return byPortal;
+    return (a.puerta || a.letra || "").localeCompare(b.puerta || b.letra || "", "es");
+  }
+
+  function cargoNum(ref) {
+    const text = String(ref || "");
+    if (text.length < 18) return 0;
+    const n = parseInt(text.slice(14, 18), 10);
+    return isNaN(n) ? 0 : n;
+  }
+
+  function parseUnidadLetra(letra) {
+    const text = String(letra || "").trim();
+    const bloq = text.match(/^Bloq\.\s*(\d+|[A-Za-z])\s*(.*)$/i);
+    if (bloq) {
+      const n = parseInt(bloq[1], 10);
+      return {
+        portal: isNaN(n) ? bloq[1].toUpperCase() : String(n),
+        puerta: bloq[2].trim(),
+        kind: "bloque"
+      };
+    }
+    const esc = text.match(/^Esc\.\s*(\d+|[A-Za-z])\s*(.*)$/i);
+    if (esc) {
+      const n = parseInt(esc[1], 10);
+      return {
+        portal: isNaN(n) ? esc[1].toUpperCase() : String(n),
+        puerta: esc[2].trim(),
+        kind: "escalera"
+      };
+    }
+    return { portal: "", puerta: text, kind: "" };
+  }
+
+  function assignPortals(unidades) {
+    if (!unidades || !unidades.length) return;
+    const parsed = unidades.map(function (unidad) {
+      return parseUnidadLetra(unidad.letra);
+    });
+    unidades.forEach(function (unidad, i) {
+      unidad.puerta = parsed[i].puerta || unidad.letra || "";
+      unidad.portal = "";
+      unidad.portalKind = "";
+    });
+    const counts = {};
+    unidades.forEach(function (unidad) {
+      const key = (unidad.planta || "") + "\n" + (unidad.puerta || "");
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    const needsPortal = Object.keys(counts).some(function (key) {
+      return counts[key] > 1;
+    });
+    if (!needsPortal) return;
+
+    const explicit = parsed.filter(function (item) { return item.portal; }).length;
+    if (explicit >= unidades.length * 0.6) {
+      unidades.forEach(function (unidad, i) {
+        if (!parsed[i].portal) return;
+        unidad.portal = parsed[i].portal;
+        unidad.portalKind = parsed[i].kind;
+      });
+    } else {
+      const order = unidades.map(function (_, i) { return i; }).sort(function (a, b) {
+        return cargoNum(unidades[a].ref) - cargoNum(unidades[b].ref);
+      });
+      let portal = 0;
+      let prevFloor = null;
+      order.forEach(function (i) {
+        const floor = plantaOrder(unidades[i].planta);
+        if (prevFloor == null || (floor <= 1 && prevFloor >= 3)) {
+          portal += 1;
+        }
+        unidades[i].portal = String(portal);
+        unidades[i].portalKind = "portal";
+        prevFloor = floor;
+      });
+    }
+
+    const used = {};
+    unidades.slice().sort(function (a, b) {
+      return cargoNum(a.ref) - cargoNum(b.ref);
+    }).forEach(function (unidad) {
+      const key = (unidad.planta || "") + "\n" + (unidad.puerta || "");
+      const seen = used[key] || (used[key] = {});
+      const portal = unidad.portal || "?";
+      if (!seen[portal]) {
+        seen[portal] = true;
+        return;
+      }
+      let extra = 1;
+      while (seen[portal + "-" + extra]) extra += 1;
+      unidad.portal = portal + "-" + extra;
+      seen[unidad.portal] = true;
+    });
+  }
+
+  function unidadLabel(unidad, showPortal) {
+    const puerta = unidad.puerta || unidad.letra || "";
+    const ref = String(unidad.ref || "").trim();
+    const parts = [];
+    if (showPortal && unidad.portal) {
+      const kind = unidad.portalKind === "bloque"
+        ? "Bloque"
+        : unidad.portalKind === "escalera"
+          ? "Escalera"
+          : "Portal";
+      parts.push("<em class='portal-tag'>" + esc(kind + " " + unidad.portal) + "</em>");
+    }
+    if (puerta) parts.push(esc(puerta));
+    parts.push(esc(ref || "Sin referencia"));
+    return parts.join(" · ");
   }
 
   function buildPointLayers(features) {
@@ -194,12 +335,15 @@ require([
       const props = feature.properties || {};
       if (props.tipo === "plurifamiliar") {
         const list = unidadesPorRc[props.rc] || (unidadesPorRc[props.rc] = []);
+        const coords = feature.geometry && feature.geometry.coordinates;
         list.push({
           direccion: props.direccion,
           planta: props.planta,
           letra: props.letra,
           residentes: props.residentes,
-          ref: props.ref || ""
+          ref: props.ref || "",
+          lon: coords ? coords[0] : null,
+          lat: coords ? coords[1] : null
         });
         return;
       }
@@ -208,6 +352,8 @@ require([
 
     edificios.forEach(function (building) {
       building.unidades = (unidadesPorRc[building.rc] || []).slice().sort(compareUnidad);
+      assignPortals(building.unidades);
+      building.unidades.sort(compareUnidad);
     });
 
     const pluri = [];
@@ -413,10 +559,22 @@ require([
     elevationInfo: { mode: "relative-to-scene", offset: 8, unit: "meters" }
   });
 
+  const highlightGroundLayer = new GraphicsLayer({
+    title: "Selección suelo",
+    listMode: "hide",
+    elevationInfo: { mode: "on-the-ground" }
+  });
+
+  const highlightLayer = new GraphicsLayer({
+    title: "Selección",
+    listMode: "hide",
+    elevationInfo: { mode: "relative-to-scene", offset: 3, unit: "meters" }
+  });
+
   const map = new Map({
     basemap: basemaps[0],
     ground: "world-elevation",
-    layers: [maskLayer, parcelasLayer, buildingsLayer, drawLayer, labelLayer]
+    layers: [maskLayer, parcelasLayer, buildingsLayer, drawLayer, labelLayer, highlightGroundLayer, highlightLayer]
   });
 
   const homeCamera = {
@@ -450,6 +608,30 @@ require([
   view.popup.autoCloseEnabled = false;
   sceneView = view;
 
+  function styleHighlights(targetView) {
+    if (!targetView) return;
+    if (targetView.highlights && typeof targetView.highlights.find === "function") {
+      const current = targetView.highlights.find(function (item) {
+        return item.name === "default";
+      });
+      if (current) {
+        current.color = [245, 197, 24];
+        current.haloColor = [255, 255, 255];
+        current.haloOpacity = 1;
+        current.fillOpacity = 0.45;
+      }
+    } else if (targetView.highlightOptions) {
+      targetView.highlightOptions = {
+        color: [245, 197, 24],
+        haloColor: [255, 255, 255],
+        haloOpacity: 0.95,
+        fillOpacity: 0.4
+      };
+    }
+  }
+
+  styleHighlights(view);
+
   const homeWidget = new Home({ view: view });
   const basemapGallery = new BasemapGallery({
     view: view,
@@ -466,10 +648,12 @@ require([
   const areaPanel = document.getElementById("areaPanel");
   const areaHint = document.getElementById("areaHint");
   const btnArea = document.getElementById("btnArea");
+  const btnStreet = document.getElementById("btnStreet");
   const btnView = document.getElementById("btnView");
+  let streetMode = false;
 
   function detachChrome() {
-    [homeWidget, btnView, basemapExpand, btnArea].forEach(function (item) {
+    [homeWidget, btnView, basemapExpand, btnStreet, btnArea].forEach(function (item) {
       view.ui.remove(item);
     });
   }
@@ -479,7 +663,7 @@ require([
     basemapGallery.view = view;
     basemapExpand.view = view;
     basemapExpand.expanded = false;
-    view.ui.add([homeWidget, btnView, basemapExpand, btnArea], "top-right");
+    view.ui.add([homeWidget, btnView, basemapExpand, btnStreet, btnArea], "top-right");
   }
 
   function unbindView() {
@@ -520,6 +704,7 @@ require([
     if (incidenciaLayer && incRenderer2d && incRenderer3d) {
       incidenciaLayer.renderer = flat ? incRenderer2d : incRenderer3d;
     }
+    if (selectedTarget) applyHighlight(selectedTarget);
     btnView.textContent = flat ? "3D" : "2D";
     btnView.title = flat ? "Vista 3D" : "Vista 2D";
     btnView.setAttribute("aria-label", btnView.title);
@@ -541,7 +726,7 @@ require([
       if (areaVertices.length >= 3 && (armed || nearFirstVertex(event))) closeArea();
     }));
     viewHandles.push(view.on("pointer-up", function (event) {
-      if (areaMode) return;
+      if (areaMode || streetMode) return;
       if (!press) return;
       const dx = event.x - press.x;
       const dy = event.y - press.y;
@@ -556,6 +741,11 @@ require([
       if (areaMode) {
         event.stopPropagation();
         addAreaVertex(event);
+        return;
+      }
+      if (streetMode) {
+        event.stopPropagation();
+        openStreetViewAt(event);
         return;
       }
       identifyFromPointer(event);
@@ -577,6 +767,8 @@ require([
       stopAreaDraw();
       areaPanel.hidden = true;
     }
+    const keepStreet = streetMode;
+    if (streetMode) stopStreetMode();
     view.closePopup();
     basemapExpand.expanded = false;
     const center = view.center ? view.center.clone() : null;
@@ -617,6 +809,7 @@ require([
     }
 
     view.popup.autoCloseEnabled = false;
+    styleHighlights(view);
     mountChrome();
     bindView();
     watchPopup();
@@ -632,6 +825,7 @@ require([
       refreshLabels();
       syncLayout();
       setPopupOpen(view.popup && view.popup.visible);
+      if (keepStreet) startStreetMode();
       switching = false;
     }).catch(function (err) {
       switching = false;
@@ -844,7 +1038,53 @@ require([
     if (surface) surface.style.cursor = "";
   }
 
+  function stopStreetMode() {
+    streetMode = false;
+    btnStreet.classList.remove("is-active");
+    btnStreet.title = "Street View";
+    btnStreet.setAttribute("aria-label", "Street View");
+    document.body.classList.remove("street-mode");
+    const surface = drawSurface();
+    if (surface && !areaMode) surface.style.cursor = "";
+  }
+
+  function startStreetMode() {
+    if (areaMode) {
+      drawLayer.removeAll();
+      stopAreaDraw();
+      areaPanel.hidden = true;
+    }
+    view.closePopup();
+    basemapExpand.expanded = false;
+    streetMode = true;
+    btnStreet.classList.add("is-active");
+    btnStreet.title = "Salir de Street View";
+    btnStreet.setAttribute("aria-label", "Salir de Street View");
+    document.body.classList.add("street-mode");
+    const surface = drawSurface();
+    if (surface) surface.style.cursor = "crosshair";
+  }
+
+  function streetViewUrl(lon, lat) {
+    let url = "https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=" +
+      encodeURIComponent(lat + "," + lon);
+    if (view.type === "3d" && view.camera && typeof view.camera.heading === "number") {
+      url += "&heading=" + encodeURIComponent(String(Math.round(view.camera.heading)));
+    }
+    return url;
+  }
+
+  function openStreetViewAt(event) {
+    const mapPoint = event.mapPoint || view.toMap({ x: event.x, y: event.y });
+    const ll = lonLatOf(mapPoint);
+    if (!ll) return;
+    ignoreIdentifyUntil = Date.now() + 700;
+    stopStreetMode();
+    window.open(streetViewUrl(ll.lon, ll.lat), "_blank", "noopener,noreferrer");
+  }
+
   function startAreaDraw() {
+    if (streetMode) stopStreetMode();
     view.closePopup();
     basemapExpand.expanded = false;
     drawLayer.removeAll();
@@ -908,6 +1148,14 @@ require([
       return;
     }
     startAreaDraw();
+  });
+
+  btnStreet.addEventListener("click", function () {
+    if (streetMode) {
+      stopStreetMode();
+      return;
+    }
+    startStreetMode();
   });
 
   document.getElementById("btnClearArea").addEventListener("click", function () {
@@ -1081,8 +1329,13 @@ require([
 
   function floorsHtml(list) {
     const addresses = {};
-    list.forEach(function (unidad) { addresses[unidad.direccion || ""] = true; });
+    const portals = {};
+    list.forEach(function (unidad) {
+      addresses[unidad.direccion || ""] = true;
+      if (unidad.portal) portals[unidad.portal] = true;
+    });
     const showAddress = Object.keys(addresses).length > 1;
+    const showPortal = Object.keys(portals).length > 1;
     const groups = [];
     const index = {};
     list.forEach(function (unidad) {
@@ -1108,13 +1361,11 @@ require([
           return sum + (Number(unidad.residentes) || 0);
         }, 0);
         const viviendas = group.unidades.length === 1 ? "1 vivienda" : group.unidades.length + " viviendas";
-        const rows = group.unidades.slice().sort(function (a, b) {
-          return (a.letra || "").localeCompare(b.letra || "", "es");
-        }).map(function (unidad) {
+        const rows = group.unidades.slice().sort(compareUnidad).map(function (unidad) {
           const ref = String(unidad.ref || "").trim();
-          const label = unidad.letra ? unidad.letra + " · " + (ref || "Sin referencia") : (ref || "Sin referencia");
+          const label = unidadLabel(unidad, showPortal);
           return (
-            "<li><span class='floor-ref'>" + esc(label) + "</span>" +
+            "<li><span class='floor-ref'>" + label + "</span>" +
             "<b class='floor-res'>" + esc(residentesTxt(unidad.residentes)) + "</b>" +
             catastroAnchor(ref) + "</li>"
           );
@@ -1202,6 +1453,10 @@ require([
     try {
       popupVisibleHandle = view.popup.watch("visible", function (visible) {
         setPopupOpen(!!visible);
+        if (!visible && !switching) {
+          selectedTarget = null;
+          clearHighlight();
+        }
       });
       setPopupOpen(!!view.popup.visible);
     } catch (err) {
@@ -1249,6 +1504,13 @@ require([
 
   let identifySeq = 0;
 
+  function clearSelection() {
+    selectedTarget = null;
+    clearHighlight();
+    if (view && view.popup) view.closePopup();
+    setPopupOpen(false);
+  }
+
   function identify(x, y, mapPoint) {
     const seq = ++identifySeq;
     const ll = lonLatOf(mapPoint);
@@ -1268,6 +1530,16 @@ require([
       if (graphicHit) {
         const attrs = graphicHit.graphic.attributes;
         const building = edificiosPorRc[attrs.rc];
+        const geom = graphicHit.graphic.geometry;
+        const llHit = lonLatOf(geom) || ll;
+        applyHighlight({
+          lon: llHit ? llHit.lon : null,
+          lat: llHit ? llHit.lat : null,
+          tipo: attrs.tipo,
+          rc: attrs.rc,
+          ref: attrs.ref || "",
+          incidencia: attrs.incidencia || ""
+        });
         if (attrs.incidencia || attrs.tipo !== "plurifamiliar" || !building) {
           openPopup(graphicHit.mapPoint || ground, attrs.direccion, dwellingHtml(attrs));
         } else {
@@ -1275,7 +1547,10 @@ require([
         }
         return null;
       }
-      if (!parcelasOk) return null;
+      if (!parcelasOk) {
+        clearSelection();
+        return null;
+      }
       return parcelasLayer.queryFeatures({
         geometry: ground,
         spatialRelationship: "intersects",
@@ -1283,10 +1558,25 @@ require([
         returnGeometry: false
       });
     }).then(function (result) {
-      if (seq !== identifySeq || !result || !result.features || !result.features.length) return;
+      if (seq !== identifySeq || result == null) return;
+      if (!result.features || !result.features.length) {
+        clearSelection();
+        return;
+      }
       const rc = (result.features[0].attributes.REFCAT || "").trim();
       const building = edificiosPorRc[rc];
-      if (!building) return;
+      if (!building) {
+        clearSelection();
+        return;
+      }
+      applyHighlight({
+        lon: building.lon,
+        lat: building.lat,
+        tipo: building.tipo,
+        rc: building.rc,
+        ref: building.ref || "",
+        incidencia: building.incidencia || ""
+      });
       openPopup(ground, building.direccion, buildingHtml(building));
     }).catch(function (err) {
       console.error(err);
@@ -1299,13 +1589,159 @@ require([
   let lastIdentifyAt = 0;
 
   function identifyFromPointer(event) {
-    if (areaMode || Date.now() < ignoreIdentifyUntil) return;
+    if (areaMode || streetMode || Date.now() < ignoreIdentifyUntil) return;
     const now = Date.now();
     if (now - lastIdentifyAt < 450) return;
     lastIdentifyAt = now;
     const mapPoint = event.mapPoint || view.toMap({ x: event.x, y: event.y });
     if (!mapPoint) return;
     identify(event.x, event.y, mapPoint);
+  }
+
+  function highlightKind(target) {
+    if (!target) return "uni";
+    if (target.incidencia) return "incidencia";
+    if (target.tipo === "plurifamiliar" || target.tipo === "casas") return "pluri";
+    return "uni";
+  }
+
+  function highlightSymbol(flat, kind) {
+    const gold = "#f5c518";
+    const fill = [245, 197, 24, 0.22];
+    if (flat) {
+      return {
+        type: "simple-marker",
+        style: kind === "pluri" ? "square" : (kind === "incidencia" ? "diamond" : "circle"),
+        size: kind === "pluri" ? 28 : 24,
+        color: fill,
+        outline: { color: gold, width: 3.5 }
+      };
+    }
+    if (kind === "pluri") {
+      return new PointSymbol3D({
+        symbolLayers: [
+          new IconSymbol3DLayer({
+            resource: { primitive: "square" },
+            size: 42,
+            material: { color: fill },
+            outline: { color: gold, size: 3.5 }
+          })
+        ],
+        verticalOffset: {
+          screenLength: 52,
+          maxWorldLength: 48,
+          minWorldLength: 8
+        },
+        callout: new LineCallout3D({
+          size: 3,
+          color: [245, 197, 24, 1]
+        })
+      });
+    }
+    return new PointSymbol3D({
+      symbolLayers: [
+        new IconSymbol3DLayer({
+          resource: { primitive: kind === "incidencia" ? "kite" : "circle" },
+          size: 28,
+          material: { color: fill },
+          outline: { color: gold, size: 3 }
+        })
+      ]
+    });
+  }
+
+  function highlightRing(lon, lat, meters) {
+    const ring = [];
+    const cos = Math.cos(lat * Math.PI / 180) || 1;
+    for (let i = 0; i <= 48; i++) {
+      const angle = (i / 48) * Math.PI * 2;
+      ring.push([
+        lon + (Math.cos(angle) * meters) / (111320 * cos),
+        lat + (Math.sin(angle) * meters) / 110540
+      ]);
+    }
+    return new Polygon({
+      rings: [ring],
+      spatialReference: { wkid: 4326 }
+    });
+  }
+
+  function clearHighlight() {
+    if (highlightHandle) {
+      highlightHandle.remove();
+      highlightHandle = null;
+    }
+    highlightLayer.removeAll();
+    highlightGroundLayer.removeAll();
+  }
+
+  function sqlText(value) {
+    return String(value || "").replace(/'/g, "''");
+  }
+
+  function applyHighlight(target) {
+    selectedTarget = target || null;
+    clearHighlight();
+    if (!target || target.lon == null || target.lat == null) return;
+    const kind = highlightKind(target);
+    const flat = view.type === "2d";
+    const point = new Point({ longitude: target.lon, latitude: target.lat });
+    highlightGroundLayer.add(new Graphic({
+      geometry: highlightRing(target.lon, target.lat, kind === "pluri" ? 36 : 12),
+      symbol: {
+        type: "simple-fill",
+        color: [245, 197, 24, 0.28],
+        outline: { color: [245, 197, 24, 1], width: 3 }
+      }
+    }));
+    highlightLayer.add(new Graphic({
+      geometry: point,
+      symbol: highlightSymbol(flat, kind)
+    }));
+    const layer = target.incidencia
+      ? incidenciaLayer
+      : (kind === "pluri" ? plurifamiliarLayer : unifamiliarLayer);
+    if (!layer) return;
+    const where = target.ref
+      ? "ref = '" + sqlText(target.ref) + "'"
+      : (target.rc ? "rc = '" + sqlText(target.rc) + "'" : "");
+    if (!where) return;
+    view.whenLayerView(layer).then(function (layerView) {
+      if (selectedTarget !== target) return;
+      return layer.queryFeatures({
+        where: where,
+        returnGeometry: false
+      }).then(function (result) {
+        if (selectedTarget !== target) return;
+        if (highlightHandle) {
+          highlightHandle.remove();
+          highlightHandle = null;
+        }
+        if (result.features && result.features.length) {
+          highlightHandle = layerView.highlight(result.features);
+        }
+      });
+    }).catch(function (err) {
+      console.error(err);
+    });
+  }
+
+  function focusOf(building, address) {
+    const wanted = String(address || "").trim();
+    const units = (building.unidades || []).filter(function (unidad) {
+      if (unidad.lon == null || unidad.lat == null) return false;
+      return !wanted || String(unidad.direccion || "").trim() === wanted;
+    });
+    if (units.length) {
+      let lon = 0;
+      let lat = 0;
+      units.forEach(function (unidad) {
+        lon += unidad.lon;
+        lat += unidad.lat;
+      });
+      return { lon: lon / units.length, lat: lat / units.length };
+    }
+    return { lon: building.lon, lat: building.lat };
   }
 
   function flyTo(lon, lat) {
@@ -1319,13 +1755,22 @@ require([
     );
   }
 
-  function showBuilding(building) {
+  function showBuilding(building, address) {
+    const focus = focusOf(building, address);
     const point = new Point({
-      longitude: building.lon,
-      latitude: building.lat
+      longitude: focus.lon,
+      latitude: focus.lat
     });
-    openPopup(point, building.direccion, buildingHtml(building));
-    flyTo(building.lon, building.lat).catch(function (err) {
+    applyHighlight({
+      lon: focus.lon,
+      lat: focus.lat,
+      tipo: building.tipo,
+      rc: building.rc,
+      ref: building.ref || "",
+      incidencia: building.incidencia || ""
+    });
+    openPopup(point, address || building.direccion, buildingHtml(building));
+    flyTo(focus.lon, focus.lat).catch(function (err) {
       console.error(err);
     });
   }
@@ -1448,7 +1893,7 @@ require([
     const row = searchList._matches[Number(button.dataset.index)];
     searchInput.value = row.label;
     hideSearch();
-    showBuilding(row.building);
+    showBuilding(row.building, row.label);
   });
 
   document.addEventListener("click", function (event) {
@@ -1547,6 +1992,16 @@ require([
         if (group.length === 1) houseFeatures.push(group[0]);
         else group.forEach(function (feature) { aptFeatures.push(feature); });
       });
+
+      if (
+        aptFeatures.length &&
+        houseFeatures.length &&
+        isGroundCommunity(byRc[rc]) &&
+        looksLikeHouseNumbers(aptFeatures)
+      ) {
+        houseFeatures.forEach(function (feature) { aptFeatures.push(feature); });
+        houseFeatures.length = 0;
+      }
 
       houseFeatures.forEach(function (feature) {
         const props = feature.properties;
@@ -1747,6 +2202,9 @@ require([
       });
     }
     map.addMany(layers);
+    map.reorder(labelLayer, map.layers.length - 1);
+    map.reorder(highlightGroundLayer, map.layers.length - 1);
+    map.reorder(highlightLayer, map.layers.length - 1);
     const parcelas = Object.keys(edificiosPorRc).length;
     const extraParcelas = {};
     incidenciaFeatures.forEach(function (feature) {
