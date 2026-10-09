@@ -179,9 +179,21 @@ html, body, #viewDiv {
 }
 
 #btnArea.is-active,
-#btnArea.is-active:hover {
+#btnArea.is-active:hover,
+#btnStreet.is-active,
+#btnStreet.is-active:hover {
   background: var(--accent);
   color: #fff;
+}
+
+.btn-street .pegman-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+body.street-mode .esri-view-surface {
+  cursor: crosshair;
 }
 
 .view-toggle {
@@ -378,6 +390,11 @@ html, body, #viewDiv {
   font-size: 12px;
 }
 .floors li .floor-ref { flex: 1 1 100%; word-break: break-all; }
+.floors li .portal-tag {
+  font-style: normal;
+  font-weight: 700;
+  color: var(--accent);
+}
 .floors li .floor-res { color: var(--ink); font-weight: 650; }
 .floors .catastro-link,
 .popup-card .catastro-link {
