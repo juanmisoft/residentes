@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "ambito": "Dentro del límite municipal de Rivas-Vaciamadrid",
+  "viviendas": 35826,
+  "residentes": 106954,
+  "hombres": 52702,
+  "mujeres": 54252,
+  "extranjeros": 11622,
+  "pct_extranjeros": 10.9,
+  "nacionalidades_distintas": 116,
+  "barrios": [
+    {
+      "nombre": "Barrio Centro",
+      "residentes": 42531,
+      "edad_media": 39.2
+    },
+    {
+      "nombre": "Barrio Este",
+      "residentes": 17255,
+      "edad_media": 39.5
+    },
+    {
+      "nombre": "Barrio Oeste",
+      "residentes": 44907,
+      "edad_media": 40.2
+    }
+  ],
+  "barrio_mas_joven": {
+    "nombre": "Barrio Centro",
+    "residentes": 42531,
+    "edad_media": 39.2
+  },
+  "barrio_mas_envejecido": {
+    "nombre": "Barrio Oeste",
+    "residentes": 44907,
+    "edad_media": 40.2
+  },
+  "top_calles_mujeres_20_30": [
+    {
+      "via": "CALLE CAÑADA REAL GALIANA",
+      "mujeres_20_30": 175
+    },
+    {
+      "via": "AVDA PABLO IGLESIAS",
+      "mujeres_20_30": 161
+    },
+    {
+      "via": "RONDA OVIEDO",
+      "mujeres_20_30": 134
+    },
+    {
+      "via": "AVDA LEVANTE",
+      "mujeres_20_30": 126
+    },
+    {
+      "via": "PASEO CAPA NEGRA",
+      "mujeres_20_30": 126
+    },
+    {
+      "via": "CALLE BEATRIZ GALINDO",
+      "mujeres_20_30": 123
+    },
+    {
+      "via": "AVDA JOSE HIERRO",
+      "mujeres_20_30": 120
+    },
+    {
+      "via": "AVDA PILAR MIRO",
+      "mujeres_20_30": 97
+    },
+    {
+      "via": "CALLE PILAR BARDEM",
+      "mujeres_20_30": 94
+    },
+    {
+      "via": "CALLE MADRES DE LA PLAZA DE MAYO",
+      "mujeres_20_30": 92
+    }
+  ],
+  "unifamiliar_mas_residentes": {
+    "direccion": "CALLE CASAS BLANCAS 20",
+    "residentes": 18,
+    "vid": 11521
+  },
+  "top_unifamiliares": [
+    {
+      "direccion": "CALLE CASAS BLANCAS 20",
+      "residentes": 18,
+      "vid": 11521
+    },
+    {
+      "direccion": "CALLE ROSA CHACEL 11",
+      "residentes": 16,
+      "vid": 26380
+    },
+    {
+      "direccion": "CALLE ENRIQUE GRANADOS 14",
+      "residentes": 15,
+      "vid": 14054
+    },
+    {
+      "direccion": "AVDA PABLO IGLESIAS 40",
+      "residentes": 14,
+      "vid": 5312
+    },
+    {
+      "direccion": "CALLE AZAHAR 61",
+      "residentes": 13,
+      "vid": 9975
+    }
+  ],
+  "top_nacionalidades": [
+    {
+      "nacionalidad": "Rumanía",
+      "residentes": 2376
+    },
+    {
+      "nacionalidad": "Venezuela",
+      "residentes": 1480
+    },
+    {
+      "nacionalidad": "Colombia",
+      "residentes": 1308
+    },
+    {
+      "nacionalidad": "Marruecos",
+      "residentes": 1114
+    },
+    {
+      "nacionalidad": "Italia",
+      "residentes": 691
+    },
+    {
+      "nacionalidad": "Perú",
+      "residentes": 664
+    },
+    {
+      "nacionalidad": "China",
+      "residentes": 459
+    },
+    {
+      "nacionalidad": "Portugal",
+      "residentes": 269
+    },
+    {
+      "nacionalidad": "Bulgaria",
+      "residentes": 226
+    },
+    {
+      "nacionalidad": "Cuba",
+      "residentes": 192
+    },
+    {
+      "nacionalidad": "Argentina",
+      "residentes": 180
+    },
+    {
+      "nacionalidad": "Ecuador",
+      "residentes": 156
+    },
+    {
+      "nacionalidad": "Brasil",
+      "residentes": 149
+    },
+    {
+      "nacionalidad": "Polonia",
+      "residentes": 134
+    },
+    {
+      "nacionalidad": "Francia",
+      "residentes": 133
+    }
+  ],
+  "canada_real": {
+    "viviendas": 560,
+    "residentes": 2319,
+    "criterio": "Dirección o incidencia con «Cañada Real» / «Cañada Galiana»."
+  },
+  "notas": {
+    "unifamiliar": "Se excluyen incidencias y viviendas con 20+ residentes (posible residencia/colectivo).",
+    "calles": "Agrupación por nombre de vía (sin número de portal)."
+  }
+}

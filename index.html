@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Residentes por vivienda · Rivas-Vaciamadrid</title>
   <link rel="stylesheet" href="https://js.arcgis.com/4.33/esri/themes/light/main.css" />
-  <link rel="stylesheet" href="styles.css?v=65" />
+  <link rel="stylesheet" href="styles.css?v=85" />
 </head>
 <body>
   <div id="viewDiv"></div>
@@ -14,7 +14,6 @@
     <div class="brand">
       <img class="brand-logo" src="Logo_OITR.png" alt="Rivas Vaciamadrid · Oficina de Información Territorial" />
       <h1>Residentes por vivienda</h1>
-      <button id="btnHelp" class="help-btn" type="button" title="Cómo usar el mapa" aria-label="Cómo usar el mapa">?</button>
     </div>
 
     <div class="search" id="searchBox">
@@ -23,11 +22,26 @@
     </div>
 
     <div class="stats" aria-label="Resumen del padrón">
-      <p><b id="statViviendas">—</b><span>Viviendas</span></p>
-      <p><b id="statResidentes">—</b><span>Residentes</span></p>
-      <p><b id="statParcelas">—</b><span>Parcelas</span></p>
+      <p title="Fecha del padrón">
+        <b id="statFechaPadron" class="stat-fecha">—</b>
+        <span>Padrón a fecha</span>
+      </p>
+      <p>
+        <b id="statViviendas">—</b>
+        <span>Viviendas</span>
+      </p>
+      <p>
+        <b id="statResidentes">—</b>
+        <span>Residentes</span>
+      </p>
+      <p>
+        <b id="statParcelas">—</b>
+        <span>Parcelas</span>
+      </p>
     </div>
   </header>
+
+  <button id="btnBarrios" class="esri-widget esri-widget--button btn-barrios" type="button" title="Mostrar barrios" aria-label="Mostrar barrios" aria-pressed="false">B</button>
 
   <button id="btnStreet" class="esri-widget esri-widget--button btn-street" type="button" title="Street View" aria-label="Street View">
     <svg class="pegman-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -38,7 +52,11 @@
   <button id="btnArea" class="esri-widget esri-widget--button" type="button" title="Dibujar área" aria-label="Dibujar área">
     <span class="esri-icon-polygon" aria-hidden="true"></span>
   </button>
+  <button id="btnChat" class="esri-widget esri-widget--button btn-chat" type="button" title="Consultas del padrón" aria-label="Consultas del padrón" aria-pressed="false">
+    <span class="esri-icon-comment" aria-hidden="true"></span>
+  </button>
   <button id="btnView" class="esri-widget esri-widget--button view-toggle" type="button" title="Vista 2D" aria-label="Vista 2D">2D</button>
+  <button id="btnHelp" class="esri-widget esri-widget--button help-btn" type="button" title="Cómo usar el mapa" aria-label="Cómo usar el mapa">?</button>
 
   <aside id="areaPanel" class="area-panel" hidden>
     <div class="area-head">
@@ -64,7 +82,23 @@
     <p id="areaHint" class="hint">Clic en el mapa para los vértices. Doble clic en el primero para cerrar.</p>
   </aside>
 
-  <aside class="legend" aria-label="Leyenda">
+  <aside id="chatPanel" class="chat-panel" hidden aria-label="Consultas del padrón">
+    <div class="chat-head">
+      <div>
+        <p class="legend-title">Consultas del padrón</p>
+        <p class="chat-sub">Prueba · preguntas prefijadas (sin datos personales)</p>
+      </div>
+      <button id="btnChatClose" class="area-clear" type="button" aria-label="Cerrar">Cerrar</button>
+    </div>
+    <div id="chatLog" class="chat-log" role="log" aria-live="polite"></div>
+    <div id="chatPresets" class="chat-presets"></div>
+    <form id="chatForm" class="chat-form" autocomplete="off">
+      <input id="chatInput" type="text" placeholder="Elige una pregunta o escribe una clave…" />
+      <button type="submit" class="chat-send">Preguntar</button>
+    </form>
+  </aside>
+
+  <aside class="legend" id="legendPanel" aria-label="Leyenda">
     <p class="legend-title">Unifamiliares</p>
     <ul>
       <li><i class="swatch s1"></i> 1</li>
@@ -77,23 +111,41 @@
     <p class="legend-block"><i class="swatch sinc"></i> Incidencia · sin portal</p>
   </aside>
 
+  <section id="padronPanel" class="padron-panel" hidden aria-label="Padrón de la vivienda">
+    <div class="padron-shell">
+      <div class="padron-head">
+        <button id="btnPadronClose" class="padron-back" type="button">← Volver al mapa</button>
+        <div class="padron-head-text">
+          <p class="padron-kicker">Padrón municipal</p>
+          <h2 id="padronTitle">—</h2>
+          <p id="padronSub" class="padron-sub"></p>
+          <dl id="padronMeta" class="padron-meta" hidden></dl>
+        </div>
+      </div>
+      <div id="padronSummary" class="padron-summary"></div>
+      <div id="padronBody" class="padron-body">
+        <p class="hint">Abre una vivienda desde el mapa y pulsa «Ver padrón».</p>
+      </div>
+    </div>
+  </section>
+
   <div id="loading" class="loading">
-    <p>Cargando escena y padrón…</p>
+    <p>Cargando escena y datos del Portal…</p>
   </div>
 
   <div id="introOverlay" class="intro-overlay" hidden>
     <div class="intro-card" role="dialog" aria-modal="true" aria-labelledby="introTitle">
       <img class="intro-logo" src="Logo_OITR.png" alt="Rivas Vaciamadrid · Oficina de Información Territorial" />
       <h2 id="introTitle">Cómo usar este mapa</h2>
-      <p class="intro-lead">Consulta cuántas personas viven en cada vivienda de Rivas-Vaciamadrid.</p>
+      <p class="intro-lead">Consulta el padrón municipal de Rivas-Vaciamadrid por vivienda. Los datos se cargan del Portal (inicio de sesión de la organización). Arriba verás la <strong>fecha del padrón</strong> y los totales de viviendas, residentes y parcelas.</p>
       <ul class="intro-list">
-        <li><strong>Buscar una dirección</strong> en la barra de arriba. Escribe la calle y el número.</li>
-        <li><strong>Tocar un punto</strong> del mapa: verás los residentes de esa vivienda o del bloque. Si hay referencia catastral, se consulta Catastro (uso, superficie, antigüedad…) y se muestra un enlace a su ficha.</li>
-        <li><strong>Colores</strong> de las bolitas: de azul (1 residente) a rojo (5 o más).</li>
-        <li><strong>Cuadrado verde</strong>: bloque con varias viviendas. El rombo naranja marca una incidencia.</li>
-        <li><strong>Dibujar un área</strong> con el icono de polígono para sumar residentes y viviendas de esa zona.</li>
-        <li><strong>Street View</strong>: activa el icono de persona, haz clic en el mapa y se abre Google Street View en otra pestaña.</li>
-        <li><strong>Cambiar a 2D o 3D</strong> y elegir el mapa base con los botones de la derecha.</li>
+        <li><strong>Buscar una dirección</strong> en la barra superior.</li>
+        <li><strong>Tocar un punto</strong> para ver el resumen. En el emergente, <em>Ver padrón</em> abre la ficha de residentes (nombre, edad, sexo, nacionalidad).</li>
+        <li><strong>Rombos naranjas</strong>: incidencias (sin ref. catastral o portal), p. ej. Cañada Real; la posición es aproximada.</li>
+        <li><strong>Dibujar un área</strong> para sumar viviendas y residentes de esa zona.</li>
+        <li><strong>Barrios (B)</strong>: muestra Centro, Este y Oeste con colores distintos.</li>
+        <li><strong>Consultas</strong> (icono de comentario): preguntas rápidas del padrón (barrios, extranjeros, Cañada Real, etc.), sin datos personales.</li>
+        <li><strong>Street View</strong> y cambio <strong>2D/3D</strong> con los botones de la derecha. El <strong>?</strong> vuelve a abrir esta ayuda.</li>
       </ul>
       <label class="intro-check">
         <input id="introHide" type="checkbox" />
@@ -104,6 +156,7 @@
   </div>
 
   <script src="https://js.arcgis.com/4.33/"></script>
-  <script src="app.js?v=90"></script>
+  <script src="config.js?v=4"></script>
+  <script src="app.js?v=124"></script>
 </body>
 </html>

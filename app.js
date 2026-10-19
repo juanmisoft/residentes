@@ -1,4 +1,6 @@
 require([
+  "esri/config",
+  "esri/identity/IdentityManager",
   "esri/Map",
   "esri/Basemap",
   "esri/views/SceneView",
@@ -23,6 +25,8 @@ require([
   "esri/widgets/BasemapGallery",
   "esri/widgets/Expand"
 ], function (
+  esriConfig,
+  IdentityManager,
   Map,
   Basemap,
   SceneView,
@@ -47,6 +51,22 @@ require([
   BasemapGallery,
   Expand
 ) {
+  const APP_CFG = window.RESIDENTES_CONFIG || {};
+  const USE_PORTAL = (APP_CFG.dataSource || "portal") === "portal";
+  const PORTAL_URL = APP_CFG.portalUrl || "https://sit.rivasciudad.es/portal";
+  const VIVIENDAS_ITEM_ID = APP_CFG.viviendasItemId || "";
+  const PERSONAS_ITEM_ID = APP_CFG.personasItemId || "";
+  const FECHA_PADRON = APP_CFG.fechaPadron || "";
+  if (USE_PORTAL && PORTAL_URL) {
+    esriConfig.portalUrl = PORTAL_URL;
+  }
+
+  (function showFechaPadron() {
+    const el = document.getElementById("statFechaPadron");
+    if (!el || !FECHA_PADRON) return;
+    const m = String(FECHA_PADRON).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    el.textContent = m ? (m[3] + "/" + m[2] + "/" + m[1]) : FECHA_PADRON;
+  })();
   const COLORS = {
     1: "#3b82f6",
     2: "#14b8a6",
@@ -85,6 +105,10 @@ require([
   let incRenderer2d = null;
   let selectedTarget = null;
   let highlightHandle = null;
+  let personasCache = null;
+  let personasLoading = null;
+  let personasLayer = null;
+  let currentPadronContext = null;
 
   const LIMITE_QUERY = "https://sit.rivasciudad.es/server/rest/services/Termino_municipal_actual/FeatureServer/0/query?where=1%3D1&outFields=NOMBRE&returnGeometry=true&outSR=4326&f=json";
 
@@ -311,21 +335,45 @@ require([
     });
   }
 
+  function portalKindLabel(unidad) {
+    if (unidad.portalKind === "bloque") return "Bloque";
+    if (unidad.portalKind === "escalera") return "Escalera";
+    return "Portal";
+  }
+
   function unidadLabel(unidad, showPortal) {
     const puerta = unidad.puerta || unidad.letra || "";
     const ref = String(unidad.ref || "").trim();
     const parts = [];
     if (showPortal && unidad.portal) {
-      const kind = unidad.portalKind === "bloque"
-        ? "Bloque"
-        : unidad.portalKind === "escalera"
-          ? "Escalera"
-          : "Portal";
-      parts.push("<em class='portal-tag'>" + esc(kind + " " + unidad.portal) + "</em>");
+      parts.push("<em class='portal-tag'>" + esc(portalKindLabel(unidad) + " " + unidad.portal) + "</em>");
     }
     if (puerta) parts.push(esc(puerta));
-    parts.push(esc(ref || "Sin referencia"));
+    if (ref) parts.push(esc(ref));
+    return parts.join(" · ") || "Vivienda";
+  }
+
+  function unidadPlainLabel(unidad, showPortal) {
+    const puerta = unidad.puerta || unidad.letra || "";
+    const ref = String(unidad.ref || "").trim();
+    const parts = [];
+    if (showPortal && unidad.portal) {
+      parts.push(portalKindLabel(unidad) + " " + unidad.portal);
+    }
+    if (puerta) parts.push(puerta);
+    if (ref) parts.push(ref);
     return parts.join(" · ");
+  }
+
+  function padronMetaFromUnidad(unidad, direccion) {
+    return {
+      direccion: direccion || unidad.direccion || "",
+      portal: unidad.portal || "",
+      portalKind: portalKindLabel(unidad),
+      planta: unidad.planta || "",
+      letra: unidad.puerta || unidad.letra || "",
+      ref: String(unidad.ref || "").trim()
+    };
   }
 
   function buildPointLayers(features) {
@@ -341,6 +389,10 @@ require([
           planta: props.planta,
           letra: props.letra,
           residentes: props.residentes,
+          hombres: props.hombres,
+          mujeres: props.mujeres,
+          edad_media: props.edad_media,
+          vid: props.vid || props.id,
           ref: props.ref || "",
           lon: coords ? coords[0] : null,
           lat: coords ? coords[1] : null
@@ -351,7 +403,16 @@ require([
     });
 
     edificios.forEach(function (building) {
-      building.unidades = (unidadesPorRc[building.rc] || []).slice().sort(compareUnidad);
+      const all = unidadesPorRc[building.rc] || [];
+      let units = all;
+      if (building.tipo === "plurifamiliar" && building.direccion) {
+        const wanted = String(building.direccion).trim();
+        const filtered = all.filter(function (u) {
+          return String(u.direccion || "").trim() === wanted;
+        });
+        if (filtered.length) units = filtered;
+      }
+      building.unidades = units.slice().sort(compareUnidad);
       assignPortals(building.unidades);
       building.unidades.sort(compareUnidad);
     });
@@ -360,6 +421,35 @@ require([
     edificios.forEach(function (building) {
       if (building.tipo !== "plurifamiliar") return;
       if (building.lon == null || building.lat == null) return;
+      const unidades = building.unidades || [];
+      let hombres = 0;
+      let mujeres = 0;
+      let edadSum = 0;
+      let edadN = 0;
+      let residentes = 0;
+      const vids = [];
+      unidades.forEach(function (u) {
+        residentes += Number(u.residentes) || 0;
+        hombres += Number(u.hombres) || 0;
+        mujeres += Number(u.mujeres) || 0;
+        if (u.edad_media != null && u.residentes) {
+          edadSum += Number(u.edad_media) * (Number(u.residentes) || 0);
+          edadN += Number(u.residentes) || 0;
+        }
+        if (u.vid) vids.push(u.vid);
+      });
+      // Preferir media de las unidades de esta fachada (por si hay varias en la parcela)
+      const focus = focusOf(building, building.direccion);
+      if (focus && focus.lon != null) {
+        building.lon = focus.lon;
+        building.lat = focus.lat;
+      }
+      building.residentes = residentes || building.residentes;
+      building.viviendas = unidades.length || building.viviendas;
+      building.hombres = hombres;
+      building.mujeres = mujeres;
+      building.edad_media = edadN ? Math.round((edadSum / edadN) * 10) / 10 : null;
+      building.vids = vids;
       pluri.push({
         type: "Feature",
         geometry: { type: "Point", coordinates: [building.lon, building.lat, 6] },
@@ -368,6 +458,10 @@ require([
           direccion: building.direccion,
           residentes: building.residentes,
           viviendas: building.viviendas,
+          hombres: hombres,
+          mujeres: mujeres,
+          edad_media: building.edad_media,
+          vids: vids.join(","),
           tipo: "plurifamiliar",
           planta: "",
           letra: ""
@@ -517,6 +611,83 @@ require([
     }
   });
 
+  // https://sit.rivasciudad.es/portal/home/item.html?id=c2cd53a576504626b6c655c07ec95208
+  const barriosLayer = new FeatureLayer({
+    url: "https://sit.rivasciudad.es/server/rest/services/BARRIOS_POR_N_VIV_2020/FeatureServer/0",
+    title: "Barrios",
+    outFields: ["*"],
+    visible: false,
+    popupEnabled: true,
+    elevationInfo: { mode: "on-the-ground" },
+    labelingInfo: [{
+      labelExpressionInfo: { expression: "$feature.NOMBRE" },
+      symbol: {
+        type: "text",
+        color: [28, 36, 48, 0.95],
+        haloColor: [255, 255, 255, 0.92],
+        haloSize: 1.4,
+        font: { size: 12, weight: "bold" }
+      },
+      labelPlacement: "always-horizontal"
+    }],
+    labelsVisible: true,
+    renderer: {
+      type: "unique-value",
+      field: "NOMBRE",
+      defaultSymbol: {
+        type: "simple-fill",
+        color: [120, 120, 120, 0.18],
+        outline: { color: [80, 80, 80, 0.75], width: 1.4 }
+      },
+      uniqueValueInfos: [
+        {
+          value: "Barrio Centro",
+          label: "Centro",
+          symbol: {
+            type: "simple-fill",
+            color: [15, 111, 106, 0.28],
+            outline: { color: [15, 111, 106, 0.95], width: 1.6 }
+          }
+        },
+        {
+          value: "Barrio Este",
+          label: "Este",
+          symbol: {
+            type: "simple-fill",
+            color: [217, 119, 6, 0.28],
+            outline: { color: [180, 83, 9, 0.95], width: 1.6 }
+          }
+        },
+        {
+          value: "Barrio Oeste",
+          label: "Oeste",
+          symbol: {
+            type: "simple-fill",
+            color: [37, 99, 235, 0.26],
+            outline: { color: [29, 78, 216, 0.95], width: 1.6 }
+          }
+        }
+      ]
+    },
+    popupTemplate: {
+      title: "{NOMBRE}",
+      content: [
+        {
+          type: "fields",
+          fieldInfos: [
+            { fieldName: "NOMBRE", label: "Barrio" },
+            { fieldName: "UNIFAMILIAR", label: "Unifamiliares" },
+            { fieldName: "SUM_VIV_UNI", label: "Viviendas unifamiliares" },
+            { fieldName: "AGRUPADA", label: "Agrupadas" },
+            { fieldName: "SUM_VIV_AGRU", label: "Viviendas agrupadas" },
+            { fieldName: "COLECTIVA", label: "Colectivas" },
+            { fieldName: "SUM_VIV_COL", label: "Viviendas colectivas" }
+          ]
+        }
+      ]
+    }
+  });
+
   const buildingsLayer = new SceneLayer({
     url: "https://basemaps3d.arcgis.com/arcgis/rest/services/Esri3D_Buildings_v1/SceneServer",
     title: "Edificios",
@@ -574,7 +745,7 @@ require([
   const map = new Map({
     basemap: basemaps[0],
     ground: "world-elevation",
-    layers: [maskLayer, parcelasLayer, buildingsLayer, drawLayer, labelLayer, highlightGroundLayer, highlightLayer]
+    layers: [maskLayer, barriosLayer, parcelasLayer, buildingsLayer, drawLayer, labelLayer, highlightGroundLayer, highlightLayer]
   });
 
   const homeCamera = {
@@ -650,11 +821,15 @@ require([
   const btnArea = document.getElementById("btnArea");
   const btnStreet = document.getElementById("btnStreet");
   const btnView = document.getElementById("btnView");
+  const btnHelp = document.getElementById("btnHelp");
+  const btnBarrios = document.getElementById("btnBarrios");
+  const btnChat = document.getElementById("btnChat");
+  const chatPanel = document.getElementById("chatPanel");
   let streetMode = false;
 
   function detachChrome() {
-    [homeWidget, btnView, basemapExpand, btnStreet, btnArea].forEach(function (item) {
-      view.ui.remove(item);
+    [homeWidget, btnView, basemapExpand, btnStreet, btnArea, btnChat, btnBarrios, btnHelp].forEach(function (item) {
+      if (item) view.ui.remove(item);
     });
   }
 
@@ -663,7 +838,27 @@ require([
     basemapGallery.view = view;
     basemapExpand.view = view;
     basemapExpand.expanded = false;
-    view.ui.add([homeWidget, btnView, basemapExpand, btnStreet, btnArea], "top-right");
+    view.ui.add(
+      [homeWidget, btnView, basemapExpand, btnStreet, btnArea, btnChat, btnBarrios, btnHelp].filter(Boolean),
+      "top-right"
+    );
+  }
+
+  function syncBarriosButton() {
+    if (!btnBarrios) return;
+    const on = !!(barriosLayer && barriosLayer.visible);
+    btnBarrios.classList.toggle("is-active", on);
+    btnBarrios.setAttribute("aria-pressed", on ? "true" : "false");
+    btnBarrios.title = on ? "Ocultar barrios" : "Mostrar barrios";
+    btnBarrios.setAttribute("aria-label", btnBarrios.title);
+  }
+
+  if (btnBarrios) {
+    btnBarrios.addEventListener("click", function () {
+      barriosLayer.visible = !barriosLayer.visible;
+      syncBarriosButton();
+    });
+    syncBarriosButton();
   }
 
   function unbindView() {
@@ -1091,6 +1286,7 @@ require([
     areaVertices = [];
     startClickAt = 0;
     clearAreaFigures();
+    if (typeof setChatOpen === "function") setChatOpen(false);
     areaPanel.hidden = false;
     areaHint.textContent = "Clic en el mapa para los vértices. Doble clic en el primero para cerrar.";
     areaMode = true;
@@ -1175,10 +1371,6 @@ require([
     return n === 1 ? "1 residente" : n + " residentes";
   }
 
-  function row(label, value) {
-    return "<p><span>" + esc(label) + "</span><b>" + esc(value) + "</b></p>";
-  }
-
   function catastroUrl(rc) {
     const ref = String(rc || "").replace(/\s/g, "").toUpperCase();
     if (ref.length < 14) return "";
@@ -1189,134 +1381,177 @@ require([
     const url = catastroUrl(rc);
     if (!url) return "";
     return (
-      "<a class='catastro-link' href=\"" + esc(url) +
+      "<a class='btn-catastro' href=\"" + esc(url) +
       "\" target=\"_blank\" rel=\"noopener noreferrer\">Ver en Catastro</a>"
     );
   }
 
   function catastroLink(rc) {
-    const anchor = catastroAnchor(rc);
-    if (!anchor) return "";
-    return "<p class='popup-link'>" + anchor + "</p>";
+    return catastroAnchor(rc);
   }
 
-  function catastroBlock(rc) {
-    const ref = String(rc || "").trim();
-    const url = catastroUrl(ref);
-    if (!url) return "";
-    return row("Ref. catastral", ref) + catastroLink(ref);
+  function refCatastralTxt(ref, rc, incidencia) {
+    const value = String(ref || rc || "").trim();
+    if (value) return value;
+    if (incidencia) return "Sin ref. catastral";
+    return "—";
   }
 
-  const catastroCache = {};
-  let popupSeq = 0;
-
-  function catastroRef(value) {
-    return String(value || "").replace(/\s/g, "").toUpperCase();
-  }
-
-  function plantaCatastro(code) {
-    const text = String(code || "").trim().toUpperCase();
-    if (!text || text === ".") return "";
-    if (text === "00" || text === "BJ") return "Baja";
-    if (text === "-1" || text === "SS") return "Sótano";
-    if (text === "-2") return "Sótano -2";
-    if (text.charAt(0) === "+") return text;
-    const n = parseInt(text, 10);
-    if (!isNaN(n)) return String(n);
-    return text;
-  }
-
-  function asList(value) {
-    if (!value) return [];
-    return Array.isArray(value) ? value : [value];
-  }
-
-  function metros(value) {
-    const text = String(value == null ? "" : value).trim();
-    if (!text) return "";
-    if (/^\d+$/.test(text)) return Number(text).toLocaleString("es-ES") + " m²";
-    return text + " m²";
-  }
-
-  function catastroHtml(data) {
-    const result = data && data.consulta_dnprcResult;
-    if (!result) return "<p class='popup-note'>Catastro no ha devuelto datos.</p>";
-    const bico = result.bico;
-    const bi = bico && bico.bi;
-    if (!bi) {
-      const error = asList(result.lerr)[0];
-      const text = (error && (error.des || (error.err && error.err.des))) || "Sin datos de este inmueble";
-      return "<p class='popup-note'>" + esc(text) + "</p>";
-    }
-    const debi = bi.debi || {};
-    const finca = bico.finca || {};
-    const lines = [];
-    if (debi.luso) lines.push(row("Uso", debi.luso));
-    if (debi.sfc) lines.push(row("Superficie", metros(debi.sfc)));
-    if (debi.ant) lines.push(row("Antigüedad", debi.ant));
-    if (finca.dff && finca.dff.ss) lines.push(row("Parcela", metros(finca.dff.ss)));
-    const units = asList(bico.lcons);
-    const shown = units.slice(0, 10);
-    const unitHtml = shown.map(function (unit) {
-      const loint = (((unit.dt || {}).lourb || {}).loint) || {};
-      const planta = plantaCatastro(loint.pt);
-      const label = [planta, unit.lcd].filter(Boolean).join(" · ");
-      const surface = unit.dfcons && unit.dfcons.stl != null ? metros(unit.dfcons.stl) : "";
-      return "<li><span>" + esc(label || "Unidad") + "</span><b>" + esc(surface) + "</b></li>";
-    }).join("");
-    const more = units.length > shown.length
-      ? "<p class='popup-note'>Y " + (units.length - shown.length) + " unidades más.</p>"
-      : "";
+  function sexoChips(hombres, mujeres) {
+    const h = Number(hombres) || 0;
+    const m = Number(mujeres) || 0;
+    if (!h && !m) return "";
     return (
-      "<p class='breakdown-title'>Catastro</p>" +
-      lines.join("") +
-      (unitHtml ? "<ul class='breakdown'>" + unitHtml + "</ul>" : "") +
-      more
+      "<div class='popup-chips'>" +
+      (h ? "<span class='chip chip-h'>" + h + " hombre" + (h === 1 ? "" : "s") + "</span>" : "") +
+      (m ? "<span class='chip chip-m'>" + m + " mujer" + (m === 1 ? "" : "es") + "</span>" : "") +
+      "</div>"
     );
   }
 
-  function applyCatastro(seq, html) {
-    if (seq !== popupSeq) return;
-    const slot = document.querySelector(".popup-card .catastro-extra");
-    if (slot) slot.innerHTML = html;
+  function edadChip(edadMedia) {
+    if (edadMedia == null || edadMedia === "") return "";
+    return "<span class='chip chip-age'>Edad media " + esc(String(edadMedia).replace(".", ",")) + " años</span>";
   }
 
-  function catastroSlot(ref) {
-    const key = catastroRef(ref);
-    if (key.length < 18) return "";
-    const seq = ++popupSeq;
-    if (catastroCache[key]) {
-      return "<div class='catastro-extra'>" + catastroCache[key] + "</div>";
+  function normalizeVids(vids) {
+    if (Array.isArray(vids)) {
+      return vids.map(function (v) { return String(v || "").trim(); }).filter(Boolean);
     }
-    fetch(
-      "https://ovc.catastro.meh.es/OVCServWeb/OVCWcfCallejero/COVCCallejero.svc/json/Consulta_DNPRC?RefCat=" +
-      encodeURIComponent(key)
-    ).then(function (response) {
-      if (!response.ok) throw new Error("catastro");
-      return response.json();
-    }).then(function (data) {
-      const html = catastroHtml(data);
-      catastroCache[key] = html;
-      applyCatastro(seq, html);
-    }).catch(function () {
-      applyCatastro(seq, "<p class='popup-note'>No se ha podido consultar Catastro.</p>");
-    });
-    return "<div class='catastro-extra'><p class='popup-note'>Consultando Catastro…</p></div>";
+    return String(vids || "").split(",").map(function (v) { return v.trim(); }).filter(Boolean);
+  }
+
+  const padronRegistry = {};
+  let padronRegSeq = 0;
+
+  function registerPadronAction(vids, meta) {
+    const id = "p" + (++padronRegSeq);
+    padronRegistry[id] = {
+      vids: normalizeVids(vids),
+      meta: typeof meta === "string" ? { direccion: meta } : (meta || {})
+    };
+    return id;
+  }
+
+  function resolvePadronAction(raw) {
+    if (!raw) return null;
+    if (padronRegistry[raw]) return padronRegistry[raw];
+    // Compatibilidad: JSON o lista de vids en el hash
+    try {
+      const data = JSON.parse(decodeURIComponent(raw));
+      if (data && typeof data === "object" && data.v != null) {
+        return {
+          vids: normalizeVids(data.v),
+          meta: {
+            direccion: data.d || "",
+            portal: data.portal || "",
+            portalKind: data.portalKind || "Portal",
+            planta: data.planta || "",
+            letra: data.letra || "",
+            ref: data.ref || ""
+          }
+        };
+      }
+    } catch (err) { /* ignore */ }
+    return { vids: normalizeVids(raw), meta: {} };
+  }
+
+  function padronButton(vids, metaOrTitle, size) {
+    // ArcGIS sanitiza el HTML del popup: elimina <button> y data-*.
+    // Registramos la acción y usamos un hash corto que sí se conserva.
+    const list = normalizeVids(vids);
+    if (!list.length) {
+      return size === "sm"
+        ? ""
+        : "<span class='btn-padron is-disabled'>Padrón no disponible</span>";
+    }
+    const meta = typeof metaOrTitle === "string"
+      ? { direccion: metaOrTitle }
+      : (metaOrTitle || {});
+    const id = registerPadronAction(list, meta);
+    const label = String(meta.direccion || "").replace(/[<>"']/g, "");
+    const text = size === "sm" ? "Ver padrón" : "Ver padrón de residentes";
+    return (
+      "<a href='#padron:" + id +
+      "' class='btn-padron' title=\"" + esc(label) + "\">" + text + "</a>"
+    );
+  }
+
+  function chipSpans(hombres, mujeres, edadMedia) {
+    const h = Number(hombres) || 0;
+    const m = Number(mujeres) || 0;
+    const age = edadChip(edadMedia);
+    if (!h && !m && !age) return "";
+    return (
+      (h ? "<span class='chip chip-h'>" + h + " hombre" + (h === 1 ? "" : "s") + "</span>" : "") +
+      (m ? "<span class='chip chip-m'>" + m + " mujer" + (m === 1 ? "" : "es") + "</span>" : "") +
+      (age || "")
+    );
+  }
+
+  function popupChips(hombres, mujeres, edadMedia) {
+    const inner = chipSpans(hombres, mujeres, edadMedia);
+    return inner ? "<div class='popup-chips'>" + inner + "</div>" : "";
+  }
+
+  function popupShell(opts) {
+    const residentes = Number(opts.residentes) || 0;
+    const chips = popupChips(opts.hombres, opts.mujeres, opts.edad_media);
+    const padronMeta = opts.padronMeta || { direccion: opts.title || "" };
+    const padron = opts.showPadron === false ? "" : padronButton(opts.vids, padronMeta);
+    return (
+      "<div class='popup-card'>" +
+      (opts.incidencia ? "<p class='popup-note incidencia'>" + esc(opts.incidencia) + "</p>" : "") +
+      "<div class='popup-hero'><div><div class='big'>" + esc(String(residentes)) + "</div>" +
+      "<div class='big-label'>" + (residentes === 1 ? "residente empadronado" : "residentes empadronados") + "</div></div>" +
+      (opts.badge ? "<div class='chip'>" + esc(opts.badge) + "</div>" : "") +
+      "</div>" +
+      chips +
+      "<dl class='popup-meta'>" + (opts.metaHtml || "") + "</dl>" +
+      (opts.extraHtml || "") +
+      "<div class='popup-actions'>" +
+      padron +
+      (opts.catastroHtml || "") +
+      "</div></div>"
+    );
+  }
+
+  function metaItem(label, value) {
+    if (value == null || value === "" || value === "—") return "";
+    return "<div><dt>" + esc(label) + "</dt><dd>" + esc(value) + "</dd></div>";
   }
 
   function dwellingHtml(attrs) {
-    const letra = attrs.letra ? attrs.letra : "—";
-    return (
-      "<div class='popup-card'>" +
-      (attrs.incidencia ? "<p class='popup-note incidencia'>" + esc(attrs.incidencia) + "</p>" : "") +
-      row("Planta", attrs.planta || "—") +
-      row("Letra", letra) +
-      row("Residentes", residentesTxt(attrs.residentes)) +
-      row("Ref. catastral", attrs.ref || attrs.rc || "—") +
-      catastroSlot(attrs.ref || attrs.rc) +
-      catastroLink(attrs.ref || attrs.rc) +
-      "</div>"
-    );
+    const refTxt = refCatastralTxt(attrs.ref, attrs.rc, attrs.incidencia);
+    const vids = attrs.vid || attrs.id || "";
+    const planta = attrs.planta === "Unifamiliar" ? "" : (attrs.planta || "");
+    const meta = {
+      direccion: attrs.direccion || "",
+      portal: attrs.portal || "",
+      portalKind: attrs.portalKind || "Portal",
+      planta: planta,
+      letra: attrs.letra || attrs.puerta || "",
+      ref: String(attrs.ref || attrs.rc || "").trim()
+    };
+    return popupShell({
+      residentes: attrs.residentes,
+      hombres: attrs.hombres,
+      mujeres: attrs.mujeres,
+      edad_media: attrs.edad_media,
+      incidencia: attrs.incidencia,
+      badge: attrs.tipo === "unifamiliar" ? "Unifamiliar" : "",
+      title: attrs.direccion,
+      vids: vids,
+      metaHtml:
+        metaItem("Portal", meta.portal ? ((meta.portalKind || "Portal") + " " + meta.portal) : "") +
+        metaItem("Planta", planta) +
+        metaItem("Puerta / letra", meta.letra) +
+        metaItem("Ref. catastral", refTxt) +
+        metaItem("Tipo", attrs.tipo === "plurifamiliar" ? "Plurifamiliar" : "Unifamiliar"),
+      showPadron: true,
+      padronMeta: meta,
+      catastroHtml: catastroLink(attrs.ref || attrs.rc)
+    });
   }
 
   function plantaLabel(planta) {
@@ -1364,10 +1599,17 @@ require([
         const rows = group.unidades.slice().sort(compareUnidad).map(function (unidad) {
           const ref = String(unidad.ref || "").trim();
           const label = unidadLabel(unidad, showPortal);
+          const meta = padronMetaFromUnidad(unidad, unidad.direccion || group.direccion);
+          const unitChips = chipSpans(unidad.hombres, unidad.mujeres, unidad.edad_media);
           return (
-            "<li><span class='floor-ref'>" + label + "</span>" +
-            "<b class='floor-res'>" + esc(residentesTxt(unidad.residentes)) + "</b>" +
-            catastroAnchor(ref) + "</li>"
+            "<li>" +
+            "<div class='floor-main'><span class='floor-ref'>" + label + "</span>" +
+            "<b class='floor-res'>" + esc(residentesTxt(unidad.residentes)) + "</b></div>" +
+            (unitChips ? "<div class='floor-chips'>" + unitChips + "</div>" : "") +
+            "<div class='floor-actions'>" +
+            padronButton(unidad.vid, meta, "sm") +
+            catastroAnchor(ref) +
+            "</div></li>"
           );
         }).join("");
         return (
@@ -1393,42 +1635,65 @@ require([
     if (building.tipo === "casas") {
       const casas = building.casas || [];
       const viviendas = casas.length;
-      return (
-        "<div class='popup-card'>" +
-        row("Viviendas", viviendas === 1 ? "1 unifamiliar" : viviendas + " unifamiliares") +
-        row("Residentes", residentesTxt(building.residentes)) +
-        catastroBlock(building.rc) +
-        "<p class='popup-note'>Varias viviendas unifamiliares en la misma parcela.</p>" +
-        "<ul class='breakdown'>" +
-        casas.map(function (casa) {
-          return "<li><span>" + esc(casa.direccion) + "</span><b>" + esc(residentesTxt(casa.residentes)) + "</b></li>";
-        }).join("") +
-        "</ul></div>"
-      );
+      return popupShell({
+        residentes: building.residentes,
+        hombres: building.hombres,
+        mujeres: building.mujeres,
+        edad_media: building.edad_media,
+        badge: "Varias unifamiliares",
+        title: building.direccion,
+        showPadron: false,
+        metaHtml:
+          metaItem("Viviendas", String(viviendas)) +
+          metaItem("Parcela", building.rc || ""),
+        extraHtml: "<ul class='breakdown'>" + casas.map(function (casa) {
+          const casaChips = chipSpans(casa.hombres, casa.mujeres, casa.edad_media);
+          return (
+            "<li>" +
+            "<div class='floor-main'><span>" + esc(casa.direccion) + "</span>" +
+            "<b>" + esc(residentesTxt(casa.residentes)) + "</b></div>" +
+            (casaChips ? "<div class='floor-chips'>" + casaChips + "</div>" : "") +
+            "<div class='floor-actions'>" +
+            padronButton(casa.vid, { direccion: casa.direccion, ref: casa.ref || "" }, "sm") +
+            "</div></li>"
+          );
+        }).join("") + "</ul>",
+        catastroHtml: catastroLink(building.rc)
+      });
     }
     if (building.tipo === "unifamiliar" || building.viviendas === 1) {
-      return (
-        "<div class='popup-card'>" +
-        (building.incidencia ? "<p class='popup-note incidencia'>" + esc(building.incidencia) + "</p>" : "") +
-        row("Planta", building.planta || "—") +
-        row("Letra", building.letra || "—") +
-        row("Residentes", residentesTxt(building.residentes)) +
-        row("Ref. catastral", building.ref || building.rc || "—") +
-        catastroSlot(building.ref || building.rc) +
-        catastroLink(building.ref || building.rc) +
-        "</div>"
-      );
+      return dwellingHtml({
+        direccion: building.direccion,
+        planta: building.planta,
+        letra: building.letra,
+        residentes: building.residentes,
+        hombres: building.hombres,
+        mujeres: building.mujeres,
+        edad_media: building.edad_media,
+        ref: building.ref,
+        rc: building.rc,
+        incidencia: building.incidencia,
+        tipo: "unifamiliar",
+        vid: (building.vids && building.vids[0]) || building.vid || ""
+      });
     }
     const viviendas = Number(building.viviendas);
     const list = building.unidades || [];
-    return (
-      "<div class='popup-card'>" +
-      row("Viviendas", viviendas === 1 ? "1 vivienda" : viviendas + " viviendas") +
-      row("Residentes", residentesTxt(building.residentes)) +
-      row("Media", mediaTxt(building.residentes, viviendas)) +
-      floorsHtml(list) +
-      "</div>"
-    );
+    return popupShell({
+      residentes: building.residentes,
+      hombres: building.hombres,
+      mujeres: building.mujeres,
+      edad_media: building.edad_media,
+      badge: "Bloque / plurifamiliar",
+      title: building.direccion,
+      showPadron: false,
+      metaHtml:
+        metaItem("Viviendas", viviendas === 1 ? "1 vivienda" : viviendas + " viviendas") +
+        metaItem("Media", mediaTxt(building.residentes, viviendas)) +
+        metaItem("Parcela", building.rc || ""),
+      extraHtml: floorsHtml(list),
+      catastroHtml: catastroLink(building.rc)
+    });
   }
 
   function setPopupOpen(open) {
@@ -1529,7 +1794,17 @@ require([
       });
       if (graphicHit) {
         const attrs = graphicHit.graphic.attributes;
-        const building = edificiosPorRc[attrs.rc];
+        const wantedDir = String(attrs.direccion || "").trim();
+        let building = null;
+        if (attrs.tipo === "plurifamiliar") {
+          building = edificios.find(function (item) {
+            return item.tipo === "plurifamiliar" &&
+              item.rc === attrs.rc &&
+              (!wantedDir || String(item.direccion || "").trim() === wantedDir);
+          }) || edificiosPorRc[attrs.rc];
+        } else {
+          building = edificiosPorRc[attrs.rc];
+        }
         const geom = graphicHit.graphic.geometry;
         const llHit = lonLatOf(geom) || ll;
         applyHighlight({
@@ -1969,6 +2244,107 @@ require([
     });
   }
 
+  function offsetLonLat(lon, lat, index, total, meters) {
+    if (!total || total < 2) return { lon: lon, lat: lat };
+    const angle = (2 * Math.PI * index) / total - Math.PI / 2;
+    const m = meters == null ? 12 : meters;
+    const cos = Math.cos(lat * Math.PI / 180) || 1;
+    return {
+      lon: lon + (m * Math.sin(angle)) / (111320 * cos),
+      lat: lat + (m * Math.cos(angle)) / 110540
+    };
+  }
+
+  /** Separación en espiral para muchos puntos en el mismo sitio (p. ej. Cañada). */
+  function offsetSpiralLonLat(lon, lat, index, stepMeters) {
+    if (!index) return { lon: lon, lat: lat };
+    const step = stepMeters == null ? 7 : stepMeters;
+    const angle = index * 2.399963229728653; // ángulo áureo
+    const m = step * Math.sqrt(index);
+    const cos = Math.cos(lat * Math.PI / 180) || 1;
+    return {
+      lon: lon + (m * Math.sin(angle)) / (111320 * cos),
+      lat: lat + (m * Math.cos(angle)) / 110540
+    };
+  }
+
+  /**
+   * Separa viviendas con coordenadas idénticas (o casi) para poder clicarlas.
+   * Usado sobre todo en incidencias de Cañada (mismo centroide de parcela).
+   */
+  function spreadCoincidentFeatures(features) {
+    const groups = {};
+    (features || []).forEach(function (feature) {
+      const coords = feature.geometry && feature.geometry.coordinates;
+      if (!coords) return;
+      const key = coords[0].toFixed(5) + "|" + coords[1].toFixed(5);
+      (groups[key] = groups[key] || []).push(feature);
+    });
+    Object.keys(groups).forEach(function (key) {
+      const list = groups[key];
+      if (list.length < 2) return;
+      const baseLon = list[0].geometry.coordinates[0];
+      const baseLat = list[0].geometry.coordinates[1];
+      const useSpiral = list.length > 8;
+      const ringMeters = list.length > 20 ? 16 : 12;
+      list.forEach(function (feature, index) {
+        const nudged = useSpiral
+          ? offsetSpiralLonLat(baseLon, baseLat, index, 6.5)
+          : offsetLonLat(baseLon, baseLat, index, list.length, ringMeters);
+        feature.geometry.coordinates[0] = nudged.lon;
+        feature.geometry.coordinates[1] = nudged.lat;
+      });
+    });
+  }
+
+  function meanCoords(featureList) {
+    let lon = 0;
+    let lat = 0;
+    let n = 0;
+    (featureList || []).forEach(function (feature) {
+      const coords = feature.geometry && feature.geometry.coordinates;
+      if (!coords) return;
+      lon += coords[0];
+      lat += coords[1];
+      n += 1;
+    });
+    if (!n) return null;
+    return { lon: lon / n, lat: lat / n };
+  }
+
+  function applyCoords(featureList, lon, lat) {
+    (featureList || []).forEach(function (feature) {
+      if (!feature.geometry || !feature.geometry.coordinates) return;
+      feature.geometry.coordinates[0] = lon;
+      feature.geometry.coordinates[1] = lat;
+    });
+  }
+
+  /** Si varias direcciones caen en el mismo punto, las separa unos metros para poder clicarlas. */
+  function spreadStackedAddressGroups(groups) {
+    if (!groups || groups.length < 2) return;
+    const base = meanCoords(groups.reduce(function (all, g) {
+      return all.concat(g.features || []);
+    }, []));
+    if (!base) return;
+    const cos = Math.cos(base.lat * Math.PI / 180) || 1;
+    let maxDist2 = 0;
+    groups.forEach(function (group) {
+      const c = meanCoords(group.features);
+      if (!c) return;
+      const dx = (c.lon - base.lon) * 111320 * cos;
+      const dy = (c.lat - base.lat) * 110540;
+      maxDist2 = Math.max(maxDist2, dx * dx + dy * dy);
+    });
+    if (maxDist2 > 9) return; // ya hay >3 m de separación
+    groups.forEach(function (group, index) {
+      const nudged = offsetLonLat(base.lon, base.lat, index, groups.length, 14);
+      group.lon = nudged.lon;
+      group.lat = nudged.lat;
+      applyCoords(group.features, nudged.lon, nudged.lat);
+    });
+  }
+
   function separateHouses(features) {
     const byRc = {};
     features.forEach(function (feature) {
@@ -1986,11 +2362,15 @@ require([
         (byAddr[addr] = byAddr[addr] || []).push(feature);
       });
       const houseFeatures = [];
-      const aptFeatures = [];
+      const aptByAddr = {};
       Object.keys(byAddr).forEach(function (addr) {
         const group = byAddr[addr];
         if (group.length === 1) houseFeatures.push(group[0]);
-        else group.forEach(function (feature) { aptFeatures.push(feature); });
+        else aptByAddr[addr] = group;
+      });
+      let aptFeatures = [];
+      Object.keys(aptByAddr).forEach(function (addr) {
+        aptByAddr[addr].forEach(function (feature) { aptFeatures.push(feature); });
       });
 
       if (
@@ -1999,9 +2379,22 @@ require([
         isGroundCommunity(byRc[rc]) &&
         looksLikeHouseNumbers(aptFeatures)
       ) {
-        houseFeatures.forEach(function (feature) { aptFeatures.push(feature); });
+        houseFeatures.forEach(function (feature) {
+          const addr = ((feature.properties && feature.properties.direccion) || "").trim();
+          (aptByAddr[addr] = aptByAddr[addr] || []).push(feature);
+          aptFeatures.push(feature);
+        });
         houseFeatures.length = 0;
       }
+
+      const stackGroups = [];
+      houseFeatures.forEach(function (feature) {
+        stackGroups.push({ features: [feature] });
+      });
+      Object.keys(aptByAddr).forEach(function (addr) {
+        stackGroups.push({ features: aptByAddr[addr], address: addr });
+      });
+      spreadStackedAddressGroups(stackGroups);
 
       houseFeatures.forEach(function (feature) {
         const props = feature.properties;
@@ -2017,38 +2410,61 @@ require([
           direccion: props.direccion,
           viviendas: 1,
           residentes: Number(props.residentes) || 0,
+          hombres: Number(props.hombres) || 0,
+          mujeres: Number(props.mujeres) || 0,
+          edad_media: props.edad_media,
+          vid: props.vid || props.id,
+          vids: [props.vid || props.id].filter(Boolean),
           tipo: "unifamiliar",
           planta: props.planta,
           letra: props.letra || ""
         });
       });
 
-      if (aptFeatures.length) {
-        let lon = 0;
-        let lat = 0;
-        let residentes = 0;
-        const dirs = [];
-        aptFeatures.forEach(function (feature) {
-          const coords = feature.geometry.coordinates;
-          lon += coords[0];
-          lat += coords[1];
-          residentes += Number(feature.properties.residentes) || 0;
-          feature.properties.tipo = "plurifamiliar";
-          if (dirs.indexOf(feature.properties.direccion) === -1) dirs.push(feature.properties.direccion);
-          kept.push(feature);
+      const aptAddrs = Object.keys(aptByAddr);
+      if (aptAddrs.length) {
+        aptAddrs.forEach(function (addr) {
+          const group = aptByAddr[addr];
+          let lon = 0;
+          let lat = 0;
+          let residentes = 0;
+          let hombres = 0;
+          let mujeres = 0;
+          let edadSum = 0;
+          let edadN = 0;
+          group.forEach(function (feature) {
+            const coords = feature.geometry.coordinates;
+            const props = feature.properties;
+            lon += coords[0];
+            lat += coords[1];
+            residentes += Number(props.residentes) || 0;
+            hombres += Number(props.hombres) || 0;
+            mujeres += Number(props.mujeres) || 0;
+            if (props.edad_media != null && props.residentes) {
+              edadSum += Number(props.edad_media) * (Number(props.residentes) || 0);
+              edadN += Number(props.residentes) || 0;
+            }
+            props.tipo = "plurifamiliar";
+            kept.push(feature);
+          });
+          const entry = {
+            rc: rc,
+            lon: lon / group.length,
+            lat: lat / group.length,
+            direccion: addr,
+            viviendas: group.length,
+            residentes: residentes,
+            hombres: hombres,
+            mujeres: mujeres,
+            edad_media: edadN ? Math.round((edadSum / edadN) * 10) / 10 : null,
+            tipo: "plurifamiliar",
+            planta: "",
+            letra: ""
+          };
+          // Varias fachadas en la misma parcela: un marcador por dirección
+          search.push(entry);
+          if (!byParcel[rc]) byParcel[rc] = entry;
         });
-        byParcel[rc] = {
-          rc: rc,
-          lon: lon / aptFeatures.length,
-          lat: lat / aptFeatures.length,
-          direccion: dirs.slice(0, 3).join(" · "),
-          viviendas: aptFeatures.length,
-          residentes: residentes,
-          tipo: "plurifamiliar",
-          planta: "",
-          letra: ""
-        };
-        search.push(byParcel[rc]);
       } else if (houseFeatures.length === 1) {
         byParcel[rc] = search[search.length - 1];
       } else if (houseFeatures.length) {
@@ -2062,7 +2478,11 @@ require([
           residentes += Number(feature.properties.residentes) || 0;
           return {
             direccion: feature.properties.direccion,
-            residentes: Number(feature.properties.residentes) || 0
+            residentes: Number(feature.properties.residentes) || 0,
+            hombres: Number(feature.properties.hombres) || 0,
+            mujeres: Number(feature.properties.mujeres) || 0,
+            edad_media: feature.properties.edad_media,
+            vid: feature.properties.vid || feature.properties.id
           };
         });
         casas.sort(function (a, b) { return a.direccion.localeCompare(b.direccion, "es"); });
@@ -2112,21 +2532,399 @@ require([
     labelLayer.addMany(graphics);
   }
 
-  Promise.all([
-    fetch("data/meta.json?v=2").then(function (r) { return r.json(); }),
-    fetch("data/viviendas.geojson?v=4").then(function (r) { return r.json(); }),
-    loadLimite(),
-    view.when(),
-    buildingsLayer.when(),
-    parcelasLayer.when().then(function () {
-      parcelasOk = true;
-    }).catch(function () {
-      parcelasOk = false;
+  function fieldVal(attrs, names) {
+    if (!attrs) return null;
+    const list = Array.isArray(names) ? names : [names];
+    for (let i = 0; i < list.length; i++) {
+      const key = list[i];
+      if (attrs[key] != null && attrs[key] !== "") return attrs[key];
+      const up = String(key).toUpperCase();
+      if (attrs[up] != null && attrs[up] !== "") return attrs[up];
+      const low = String(key).toLowerCase();
+      if (attrs[low] != null && attrs[low] !== "") return attrs[low];
+    }
+    return null;
+  }
+
+  function ensurePortalSignIn() {
+    const rest = PORTAL_URL.replace(/\/$/, "") + "/sharing/rest";
+    return IdentityManager.checkSignInStatus(rest).catch(function () {
+      const loadingP = document.querySelector("#loading p");
+      if (loadingP) loadingP.textContent = "Inicia sesión en el Portal de ArcGIS…";
+      return IdentityManager.getCredential(rest);
+    });
+  }
+
+  function portalLayer(itemId) {
+    return new FeatureLayer({
+      portalItem: { id: itemId }
+    });
+  }
+
+  function queryAllGraphics(layer) {
+    return layer.load().then(function () {
+      const pageSize = Math.min(
+        (layer.capabilities && layer.capabilities.query && layer.capabilities.query.maxRecordCount) || 2000,
+        2000
+      );
+      return layer.queryFeatureCount({ where: "1=1" }).then(function (count) {
+        const pages = Math.max(1, Math.ceil(count / pageSize));
+        const tasks = [];
+        for (let i = 0; i < pages; i++) {
+          tasks.push(layer.queryFeatures({
+            where: "1=1",
+            outFields: ["*"],
+            returnGeometry: true,
+            outSpatialReference: { wkid: 4326 },
+            start: i * pageSize,
+            num: pageSize
+          }));
+        }
+        return Promise.all(tasks).then(function (results) {
+          const graphics = [];
+          results.forEach(function (res) {
+            (res.features || []).forEach(function (g) { graphics.push(g); });
+          });
+          return graphics;
+        });
+      });
+    });
+  }
+
+  function graphicToViviendaFeature(graphic) {
+    const a = graphic.attributes || {};
+    const geom = graphic.geometry;
+    let lon = null;
+    let lat = null;
+    if (geom) {
+      if (typeof geom.longitude === "number" && typeof geom.latitude === "number") {
+        lon = geom.longitude;
+        lat = geom.latitude;
+      } else if (geom.spatialReference && geom.spatialReference.isWebMercator) {
+        const geo = webMercatorUtils.webMercatorToGeographic(geom);
+        lon = geo.x;
+        lat = geo.y;
+      } else {
+        lon = geom.x;
+        lat = geom.y;
+      }
+    }
+    if (lon == null) lon = Number(fieldVal(a, ["lon", "LONGITUDE", "x"]));
+    if (lat == null) lat = Number(fieldVal(a, ["lat", "LATITUDE", "y"]));
+    const vid = fieldVal(a, ["vid", "id"]);
+    return {
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [lon, lat] },
+      properties: {
+        vid: vid,
+        id: fieldVal(a, ["id"]) != null ? fieldVal(a, ["id"]) : vid,
+        direccion: fieldVal(a, ["direccion"]) || "",
+        tipo: fieldVal(a, ["tipo"]) || "",
+        planta: fieldVal(a, ["planta"]) || "",
+        piso: fieldVal(a, ["piso"]) || "",
+        portal: fieldVal(a, ["portal"]) || "",
+        letra: fieldVal(a, ["letra"]) || "",
+        ref: fieldVal(a, ["ref", "ReferenciaCatastral"]) || "",
+        rc: fieldVal(a, ["rc", "REFCAT_14"]) || "",
+        residentes: Number(fieldVal(a, ["residentes", "HABITANTES"])) || 0,
+        hombres: Number(fieldVal(a, ["hombres"])) || 0,
+        mujeres: Number(fieldVal(a, ["mujeres"])) || 0,
+        edad_media: fieldVal(a, ["edad_media"]),
+        incidencia: fieldVal(a, ["incidencia"]) || "",
+        b0: Number(fieldVal(a, ["b0"])) || 0,
+        b1: Number(fieldVal(a, ["b1"])) || 0,
+        b2: Number(fieldVal(a, ["b2"])) || 0,
+        b3: Number(fieldVal(a, ["b3"])) || 0,
+        b4: Number(fieldVal(a, ["b4"])) || 0
+      }
+    };
+  }
+
+  function loadViviendasCollection() {
+    if (!USE_PORTAL) {
+      return fetch("data/viviendas.geojson?v=16").then(function (r) { return r.json(); });
+    }
+    const loadingP = document.querySelector("#loading p");
+    if (loadingP) loadingP.textContent = "Cargando viviendas del Portal…";
+    const layer = portalLayer(VIVIENDAS_ITEM_ID);
+    return queryAllGraphics(layer).then(function (graphics) {
+      return {
+        type: "FeatureCollection",
+        features: graphics.map(graphicToViviendaFeature).filter(function (f) {
+          const c = f.geometry && f.geometry.coordinates;
+          return c && isFinite(c[0]) && isFinite(c[1]);
+        })
+      };
+    });
+  }
+
+  function loadMetaFromFeatures(features) {
+    let residentes = 0;
+    const parcelas = {};
+    features.forEach(function (f) {
+      const p = f.properties || {};
+      residentes += Number(p.residentes) || 0;
+      if (p.rc) parcelas[p.rc] = true;
+    });
+    return {
+      viviendas: features.length,
+      residentes: residentes,
+      parcelas: Object.keys(parcelas).length,
+      fuente: USE_PORTAL ? "portal" : "local"
+    };
+  }
+
+  function ensurePersonasLayer() {
+    if (personasLayer) return Promise.resolve(personasLayer);
+    if (!USE_PORTAL) return Promise.resolve(null);
+    personasLayer = portalLayer(PERSONAS_ITEM_ID);
+    return personasLayer.load().then(function () { return personasLayer; });
+  }
+
+  function personFromAttrs(a) {
+    return {
+      nombre: fieldVal(a, ["nombre"]) || "",
+      dni: fieldVal(a, ["dni", "Identificador"]) || null,
+      tipo_doc: fieldVal(a, ["tipo_doc", "tipo_do", "Tipo_documento"]) || null,
+      sexo: fieldVal(a, ["sexo"]) || "",
+      edad: fieldVal(a, ["edad"]),
+      anio: fieldVal(a, ["anio"]),
+      nacionalidad: fieldVal(a, ["nacionalidad"]) || null
+    };
+  }
+
+  function loadPeopleByVids(vids) {
+    const list = normalizeVids(vids);
+    if (!list.length) return Promise.resolve([]);
+    if (!USE_PORTAL) {
+      return loadPersonasLocal().then(function (db) {
+        const people = [];
+        list.forEach(function (vid) {
+          (db[String(vid)] || []).forEach(function (p) { people.push(p); });
+        });
+        return people;
+      });
+    }
+    return ensurePersonasLayer().then(function (layer) {
+      const chunks = [];
+      for (let i = 0; i < list.length; i += 40) chunks.push(list.slice(i, i + 40));
+      return Promise.all(chunks.map(function (chunk) {
+        const where = chunk.map(function (vid) {
+          const n = Number(vid);
+          if (!isNaN(n) && String(n) === String(vid)) return "vid = " + n;
+          return "vid = '" + String(vid).replace(/'/g, "''") + "'";
+        }).join(" OR ");
+        return layer.queryFeatures({
+          where: where,
+          outFields: ["*"],
+          returnGeometry: false
+        });
+      })).then(function (results) {
+        const people = [];
+        results.forEach(function (res) {
+          (res.features || []).forEach(function (g) {
+            people.push(personFromAttrs(g.attributes || {}));
+          });
+        });
+        return people;
+      });
+    });
+  }
+
+  function loadPersonasLocal() {
+    if (personasCache) return Promise.resolve(personasCache);
+    if (personasLoading) return personasLoading;
+    personasLoading = fetch("data/personas.json?v=15").then(function (r) { return r.json(); }).then(function (data) {
+      personasCache = data || {};
+      personasLoading = null;
+      return personasCache;
+    }).catch(function (err) {
+      personasLoading = null;
+      throw err;
+    });
+    return personasLoading;
+  }
+
+  function closePadron() {
+    const panel = document.getElementById("padronPanel");
+    const metaEl = document.getElementById("padronMeta");
+    if (panel) panel.hidden = true;
+    if (metaEl) {
+      metaEl.hidden = true;
+      metaEl.innerHTML = "";
+    }
+    document.body.classList.remove("padron-open");
+    currentPadronContext = null;
+  }
+
+  function renderPadronPeople(people, body, summary, subEl) {
+    people.sort(function (a, b) {
+      const ae = a.edad == null ? 999 : a.edad;
+      const be = b.edad == null ? 999 : b.edad;
+      if (ae !== be) return ae - be;
+      return String(a.nombre || "").localeCompare(String(b.nombre || ""), "es");
+    });
+    const h = people.filter(function (p) { return p.sexo === "H"; }).length;
+    const m = people.filter(function (p) { return p.sexo === "M"; }).length;
+    const ages = people.map(function (p) { return p.edad; }).filter(function (v) { return v != null && v !== ""; });
+    const media = ages.length ? (ages.reduce(function (s, v) { return s + Number(v); }, 0) / ages.length) : null;
+    subEl.textContent = people.length
+      ? people.length + (people.length === 1 ? " persona empadronada" : " personas empadronadas")
+      : "No hay detalle individual para esta vivienda";
+    summary.innerHTML =
+      "<div class='padron-stat'><b>" + people.length + "</b><span>Total</span></div>" +
+      "<div class='padron-stat'><b>" + h + " / " + m + "</b><span>H / M</span></div>" +
+      "<div class='padron-stat'><b>" + (media == null ? "—" : media.toLocaleString("es-ES", { maximumFractionDigits: 1 })) + "</b><span>Edad media</span></div>";
+    if (!people.length) {
+      body.innerHTML = "<p class='hint'>Esta vivienda tiene recuento de residentes, pero no se ha podido vincular el detalle nominal.</p>";
+      return;
+    }
+    body.innerHTML =
+      "<table class='padron-table'><thead><tr>" +
+      "<th>Nombre</th><th>DNI / Doc.</th><th>Sexo</th><th>Edad</th><th>Nacionalidad</th>" +
+      "</tr></thead><tbody>" +
+      people.map(function (p) {
+        const sex = p.sexo === "H" ? "<i class='sex-dot h'></i>Hombre" : (p.sexo === "M" ? "<i class='sex-dot m'></i>Mujer" : "—");
+        const rawDni = String(p.dni || "").trim();
+        const tipoDoc = String(p.tipo_doc || "").trim();
+        const hasDni = rawDni && rawDni !== "-" && rawDni !== "—" && tipoDoc.toLowerCase() !== "ninguna";
+        const doc = hasDni
+          ? ((tipoDoc && tipoDoc.toLowerCase() !== "ninguna")
+            ? "<span class='doc-type'>" + esc(tipoDoc) + "</span> "
+            : "") + esc(rawDni)
+          : "—";
+        return "<tr><td>" + esc(p.nombre || "—") + "</td><td class='doc-cell'>" + doc + "</td><td>" + sex +
+          "</td><td>" + (p.edad == null || p.edad === "" ? "—" : esc(String(p.edad))) + "</td><td>" +
+          esc(p.nacionalidad || "—") + "</td></tr>";
+      }).join("") +
+      "</tbody></table>";
+  }
+
+  function renderPadronMeta(meta) {
+    const metaEl = document.getElementById("padronMeta");
+    if (!metaEl) return;
+    const portal = meta && meta.portal
+      ? ((meta.portalKind || "Portal") + " " + meta.portal)
+      : "";
+    const planta = meta && meta.planta && meta.planta !== "Unifamiliar" && meta.planta !== "Sin planta"
+      ? meta.planta
+      : "";
+    const letra = (meta && meta.letra) || "";
+    const ref = (meta && meta.ref) || "";
+    const items = [
+      metaItem("Portal", portal),
+      metaItem("Planta", planta),
+      metaItem("Puerta / letra", letra),
+      metaItem("Ref. catastral", ref)
+    ].join("");
+    if (!items) {
+      metaEl.hidden = true;
+      metaEl.innerHTML = "";
+      return;
+    }
+    metaEl.hidden = false;
+    metaEl.innerHTML = items;
+  }
+
+  function openPadron(vids, metaOrTitle) {
+    const panel = document.getElementById("padronPanel");
+    const body = document.getElementById("padronBody");
+    const summary = document.getElementById("padronSummary");
+    const titleEl = document.getElementById("padronTitle");
+    const subEl = document.getElementById("padronSub");
+    if (!panel) return;
+    const meta = typeof metaOrTitle === "string"
+      ? { direccion: metaOrTitle }
+      : (metaOrTitle || {});
+    const title = meta.direccion || "Vivienda";
+    currentPadronContext = { vids: vids, meta: meta, title: title };
+    titleEl.textContent = title;
+    renderPadronMeta(meta);
+    subEl.textContent = "Cargando residentes…";
+    summary.innerHTML = "";
+    body.innerHTML = "<p class='hint'>Cargando padrón…</p>";
+    // Cierra el emergente: el padrón es una interfaz aparte.
+    if (view && view.popup) view.closePopup();
+    setPopupOpen(false);
+    panel.hidden = false;
+    document.body.classList.add("padron-open");
+    loadPeopleByVids(vids).then(function (people) {
+      renderPadronPeople(people, body, summary, subEl);
+    }).catch(function (err) {
+      console.error(err);
+      body.innerHTML = "<p class='hint'>No se ha podido consultar el padrón en el Portal. ¿Has iniciado sesión?</p>";
+    });
+  }
+
+  document.getElementById("btnPadronClose").addEventListener("click", closePadron);
+  document.addEventListener("click", function (event) {
+    const btn = event.target.closest && event.target.closest("a.btn-padron, .btn-padron");
+    if (!btn || btn.classList.contains("is-disabled")) return;
+    if (!btn.classList.contains("btn-padron")) return;
+    event.preventDefault();
+    let vids = normalizeVids(btn.getAttribute("data-vids") || "");
+    let meta = {
+      direccion: btn.getAttribute("data-title") || btn.getAttribute("title") || "",
+      portal: "",
+      portalKind: "Portal",
+      planta: "",
+      letra: "",
+      ref: ""
+    };
+    if (!vids.length) {
+      const href = btn.getAttribute("href") || "";
+      const m = href.match(/#padron:([^&\s]+)/);
+      if (m) {
+        const action = resolvePadronAction(m[1]);
+        if (action) {
+          vids = normalizeVids(action.vids);
+          meta = Object.assign({}, meta, action.meta || {});
+        }
+      }
+    }
+    if (!vids.length && currentPadronContext) vids = normalizeVids(currentPadronContext.vids);
+    if ((!meta.direccion || !meta.ref) && currentPadronContext && currentPadronContext.meta) {
+      meta = Object.assign({}, currentPadronContext.meta, meta.direccion ? { direccion: meta.direccion } : {});
+    }
+    openPadron(vids, meta);
+  });
+
+  const boot = USE_PORTAL
+    ? ensurePortalSignIn().then(function () {
+      const loadingP = document.querySelector("#loading p");
+      if (loadingP) loadingP.textContent = "Cargando datos del Portal…";
+      return Promise.all([
+        loadViviendasCollection(),
+        loadLimite(),
+        view.when(),
+        buildingsLayer.when(),
+        parcelasLayer.when().then(function () { parcelasOk = true; }).catch(function () { parcelasOk = false; }),
+        ensurePersonasLayer()
+      ]);
     })
-  ]).then(function (results) {
-    applyLimite(results[2]);
-    meta = results[0];
-    const insideFeatures = (results[1].features || []).filter(function (feature) {
+    : Promise.all([
+      fetch("data/meta.json?v=13").then(function (r) { return r.json(); }),
+      loadViviendasCollection(),
+      loadLimite(),
+      view.when(),
+      buildingsLayer.when(),
+      parcelasLayer.when().then(function () { parcelasOk = true; }).catch(function () { parcelasOk = false; })
+    ]);
+
+  boot.then(function (results) {
+    let viviendasFc;
+    let limiteData;
+    if (USE_PORTAL) {
+      viviendasFc = results[0];
+      limiteData = results[1];
+      meta = loadMetaFromFeatures(viviendasFc.features || []);
+    } else {
+      meta = results[0];
+      viviendasFc = results[1];
+      limiteData = results[2];
+    }
+    applyLimite(limiteData);
+    const insideFeatures = (viviendasFc.features || []).filter(function (feature) {
       const coords = feature.geometry && feature.geometry.coordinates;
       return coords && insideLimite(coords[0], coords[1]);
     });
@@ -2136,6 +2934,8 @@ require([
       if (feature.properties && feature.properties.incidencia) incidenciaFeatures.push(feature);
       else normal.push(feature);
     });
+    // Cañada y otras incidencias: muchas viviendas comparten el centroide de parcela.
+    spreadCoincidentFeatures(incidenciaFeatures);
     const split = separateHouses(normal);
     edificios = split.search;
     incidenciaFeatures.forEach(function (feature) {
@@ -2149,6 +2949,11 @@ require([
         direccion: props.direccion,
         viviendas: 1,
         residentes: Number(props.residentes) || 0,
+        hombres: Number(props.hombres) || 0,
+        mujeres: Number(props.mujeres) || 0,
+        edad_media: props.edad_media,
+        vid: props.vid || props.id,
+        vids: [props.vid || props.id].filter(Boolean),
         tipo: "unifamiliar",
         planta: props.planta,
         letra: props.letra || "",
@@ -2231,15 +3036,16 @@ require([
     maybeShowIntro();
   }).catch(function (error) {
     console.error(error);
-    document.querySelector("#loading p").textContent =
-      "No se ha podido cargar el visor. Recarga la página.";
+    const msg = (error && (error.message || error.name)) || "";
+    document.querySelector("#loading p").textContent = USE_PORTAL
+      ? ("No se ha podido cargar el Portal. Inicia sesión con tu usuario de la organización. " + msg).trim()
+      : "No se ha podido cargar el visor. Recarga la página.";
   });
 
-  const INTRO_KEY = "residentes-intro-hide";
+  const INTRO_KEY = "residentes-intro-hide-v2";
   const introOverlay = document.getElementById("introOverlay");
   const introHide = document.getElementById("introHide");
   const btnIntroClose = document.getElementById("btnIntroClose");
-  const btnHelp = document.getElementById("btnHelp");
 
   function showIntro() {
     introHide.checked = false;
@@ -2264,6 +3070,219 @@ require([
   introOverlay.addEventListener("click", function (event) {
     if (event.target === introOverlay) hideIntro();
   });
+
+  /* ---- Chatbot de prueba (agregados prefijados, sin PII) ---- */
+  const chatLog = document.getElementById("chatLog");
+  const chatPresets = document.getElementById("chatPresets");
+  const chatForm = document.getElementById("chatForm");
+  const chatInput = document.getElementById("chatInput");
+  const btnChatClose = document.getElementById("btnChatClose");
+  let chatStats = null;
+  let chatStatsLoading = null;
+
+  const CHAT_PRESETS = [
+    { id: "barrio_joven", label: "Barrio más joven" },
+    { id: "barrio_viejo", label: "Barrio más envejecido" },
+    { id: "calles_m2030", label: "Top 10 calles · mujeres 20–30" },
+    { id: "uni_max", label: "Unifamiliar con más residentes" },
+    { id: "extranjeros", label: "¿Cuántos extranjeros hay?" },
+    { id: "nacionalidades", label: "¿De qué nacionalidades?" },
+    { id: "canada_real", label: "Residentes en Cañada Real" }
+  ];
+
+  function fmtNum(n) {
+    return Number(n || 0).toLocaleString("es-ES");
+  }
+
+  function chatEsc(text) {
+    return String(text == null ? "" : text)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function appendChat(role, html) {
+    if (!chatLog) return;
+    const div = document.createElement("div");
+    div.className = "chat-bubble " + role;
+    div.innerHTML = html;
+    chatLog.appendChild(div);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function loadChatStats() {
+    if (chatStats) return Promise.resolve(chatStats);
+    if (chatStatsLoading) return chatStatsLoading;
+    chatStatsLoading = fetch("data/chat_stats.json?v=2")
+      .then(function (r) {
+        if (!r.ok) throw new Error("No se pudo cargar chat_stats.json");
+        return r.json();
+      })
+      .then(function (data) {
+        chatStats = data;
+        chatStatsLoading = null;
+        return chatStats;
+      })
+      .catch(function (err) {
+        chatStatsLoading = null;
+        throw err;
+      });
+    return chatStatsLoading;
+  }
+
+  function answerChat(id, s) {
+    if (id === "barrio_joven" || /barrio.*joven|m[aá]s joven/i.test(id)) {
+      const b = s.barrio_mas_joven;
+      if (!b) return "No hay datos de edad por barrio.";
+      const lines = (s.barrios || []).map(function (x) {
+        return "· " + x.nombre + ": " + String(x.edad_media).replace(".", ",") + " años (" + fmtNum(x.residentes) + " res.)";
+      });
+      return (
+        "<strong>" + chatEsc(b.nombre) + "</strong> es el más joven, con edad media de <strong>" +
+        chatEsc(String(b.edad_media).replace(".", ",")) + " años</strong>.\n\n" +
+        lines.map(chatEsc).join("\n")
+      );
+    }
+    if (id === "barrio_viejo" || /envejec|mayor edad|m[aá]s viej/i.test(id)) {
+      const b = s.barrio_mas_envejecido;
+      if (!b) return "No hay datos de edad por barrio.";
+      return (
+        "<strong>" + chatEsc(b.nombre) + "</strong> es el más envejecido, con edad media de <strong>" +
+        chatEsc(String(b.edad_media).replace(".", ",")) + " años</strong> " +
+        "(" + fmtNum(b.residentes) + " residentes)."
+      );
+    }
+    if (id === "calles_m2030" || /mujeres.*20|20.*30|calles.*mujer/i.test(id)) {
+      const rows = s.top_calles_mujeres_20_30 || [];
+      if (!rows.length) return "Sin datos para ese filtro.";
+      const list = rows.map(function (r, i) {
+        return (i + 1) + ". " + chatEsc(r.via) + " — <strong>" + fmtNum(r.mujeres_20_30) + "</strong>";
+      }).join("\n");
+      return "Las 10 vías con más <strong>mujeres de 20 a 30 años</strong>:\n\n" + list;
+    }
+    if (id === "uni_max" || /unifamiliar|casa.*resident/i.test(id)) {
+      const u = s.unifamiliar_mas_residentes;
+      const note = (s.notas && s.notas.unifamiliar) || "";
+      if (!u) return "No hay unifamiliares que cumplan el filtro.";
+      const top = (s.top_unifamiliares || []).slice(0, 5).map(function (r, i) {
+        return (i + 1) + ". " + chatEsc(r.direccion) + " — <strong>" + fmtNum(r.residentes) + "</strong>";
+      }).join("\n");
+      return (
+        "La vivienda unifamiliar con más residentes (sin residencias/colectivos) es:\n\n" +
+        "<strong>" + chatEsc(u.direccion) + "</strong> — " + fmtNum(u.residentes) + " residentes.\n\n" +
+        "Top 5:\n" + top +
+        (note ? "\n\n<em>" + chatEsc(note) + "</em>" : "")
+      );
+    }
+    if (id === "extranjeros" || /extranjer|no espa/i.test(id)) {
+      return (
+        "Hay <strong>" + fmtNum(s.extranjeros) + "</strong> ciudadanos con nacionalidad extranjera " +
+        "(" + chatEsc(String(s.pct_extranjeros).replace(".", ",")) + "% del padrón en el límite municipal).\n" +
+        "Total residentes de referencia: " + fmtNum(s.residentes) + "."
+      );
+    }
+    if (id === "nacionalidades" || /nacionalidad/i.test(id)) {
+      const rows = s.top_nacionalidades || [];
+      const list = rows.slice(0, 12).map(function (r, i) {
+        return (i + 1) + ". " + chatEsc(r.nacionalidad) + " — <strong>" + fmtNum(r.residentes) + "</strong>";
+      }).join("\n");
+      return (
+        "Hay <strong>" + fmtNum(s.nacionalidades_distintas) + "</strong> nacionalidades extranjeras distintas.\n" +
+        "Principales:\n\n" + list
+      );
+    }
+    if (id === "canada_real" || /ca[nñ]ada/i.test(id)) {
+      const c = s.canada_real || {};
+      if (!c.residentes && !c.viviendas) {
+        return "No hay datos agregados de Cañada Real. Regenera <code>chat_stats.json</code>.";
+      }
+      return (
+        "En <strong>Cañada Real</strong> hay <strong>" + fmtNum(c.residentes) + "</strong> residentes " +
+        "en <strong>" + fmtNum(c.viviendas) + "</strong> viviendas " +
+        "(según dirección o incidencia con «Cañada Real» / «Cañada Galiana», dentro del límite municipal)."
+      );
+    }
+    return (
+      "Prueba una de las preguntas sugeridas. Esta demo solo responde a consultas prefijadas " +
+      "(barrios, calles, unifamiliares, extranjeros, Cañada Real)."
+    );
+  }
+
+  function resolveChatQuery(text) {
+    const t = String(text || "").trim();
+    if (!t) return null;
+    const byId = CHAT_PRESETS.find(function (p) { return p.id === t; });
+    if (byId) return byId.id;
+    const lower = t.toLowerCase();
+    if (/joven/.test(lower) && /barrio/.test(lower)) return "barrio_joven";
+    if (/envejec|viejo|mayor/.test(lower) && /barrio/.test(lower)) return "barrio_viejo";
+    if (/mujer/.test(lower) && /(20|treinta|calle)/.test(lower)) return "calles_m2030";
+    if (/unifamiliar|casa/.test(lower)) return "uni_max";
+    if (/nacionalidad/.test(lower)) return "nacionalidades";
+    if (/extranjer/.test(lower)) return "extranjeros";
+    if (/ca[nñ]ada/.test(lower)) return "canada_real";
+    return t;
+  }
+
+  function askChat(raw) {
+    const key = resolveChatQuery(raw);
+    if (!key) return;
+    const preset = CHAT_PRESETS.find(function (p) { return p.id === key; });
+    appendChat("user", chatEsc(preset ? preset.label : raw));
+    loadChatStats()
+      .then(function (s) {
+        appendChat("bot", answerChat(key, s));
+      })
+      .catch(function () {
+        appendChat("bot", "No se han podido cargar los agregados. Ejecuta <code>python build_chat_stats.py</code> y recarga.");
+      });
+  }
+
+  function setChatOpen(open) {
+    if (!chatPanel || !btnChat) return;
+    chatPanel.hidden = !open;
+    btnChat.classList.toggle("is-active", open);
+    btnChat.setAttribute("aria-pressed", open ? "true" : "false");
+    if (!open) {
+      if (chatLog) chatLog.innerHTML = "";
+      if (chatInput) chatInput.value = "";
+      return;
+    }
+    appendChat(
+      "bot",
+      "Hola. Puedo responder a unas consultas agregadas del padrón (sin nombres ni documentos).\nElige una pregunta o escribe, por ejemplo: «extranjeros»."
+    );
+    loadChatStats().catch(function () {});
+  }
+
+  if (chatPresets) {
+    CHAT_PRESETS.forEach(function (p) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chat-chip";
+      btn.textContent = p.label;
+      btn.addEventListener("click", function () { askChat(p.id); });
+      chatPresets.appendChild(btn);
+    });
+  }
+
+  if (btnChat) {
+    btnChat.addEventListener("click", function () {
+      setChatOpen(chatPanel.hidden);
+    });
+  }
+  if (btnChatClose) {
+    btnChatClose.addEventListener("click", function () { setChatOpen(false); });
+  }
+  if (chatForm) {
+    chatForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      const value = chatInput ? chatInput.value : "";
+      if (chatInput) chatInput.value = "";
+      askChat(value);
+    });
+  }
 
   function layoutPadding() {
     const bar = document.querySelector(".topbar");

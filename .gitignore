@@ -1,10 +1,27 @@
+# Lista blanca: solo el visor público + agregados sin PII.
+# El padrón nominal y las capas de vivienda/persona viven en el Portal Enterprise.
 *
 !*/
+
+# Visor
 !.gitignore
+!/README.md
+!/SECURITY.md
 !/index.html
 !/app.js
+!/config.js
 !/styles.css
 !/Logo_OITR.png
-!/data/viviendas.geojson
-!/data/meta.json
+!/server.py
+
+# Datos públicos seguros (sin nombres, DNI ni fichas personales)
+!/data/
+!/data/README.md
 !/data/limite.json
+!/data/chat_stats.json
+
+# Scripts de mantenimiento (no incluyen credenciales ni padrón)
+!/*.py
+/_tmp_*.py
+/inspect_*.py
+/inspect_*.html
