@@ -140,18 +140,27 @@ def load_portales_xy() -> dict[str, tuple[float, float]]:
                 continue
             calle = norm_key(attrs.get("CALLE") or "")
             calle = VIA_PREFIX.sub("", calle)
-            acceso = re.sub(r"\D", "", str(attrs.get("ACCESO") or ""))
-            if not calle or not acceso:
+            acceso_raw = str(attrs.get("ACCESO") or "").strip().upper()
+            if not calle or not acceso_raw:
                 continue
-            try:
-                num = str(int(acceso))
-            except ValueError:
+            # «4-6», «1-T», «12» → uno o varios números de portal
+            nums: list[str] = []
+            for part in re.split(r"[-/]", acceso_raw):
+                digits = re.sub(r"\D", "", part)
+                if not digits:
+                    continue
+                try:
+                    nums.append(str(int(digits)))
+                except ValueError:
+                    continue
+            if not nums:
                 continue
             lon, lat = float(geom["x"]), float(geom["y"])
-            by_key[f"{calle}|{num}"].append((lon, lat))
             rc = (attrs.get("REFCATASTRAL") or "").strip().upper()[:14]
-            if len(rc) >= 14:
-                by_key[f"{rc}|{calle}|{num}"].append((lon, lat))
+            for num in nums:
+                by_key[f"{calle}|{num}"].append((lon, lat))
+                if len(rc) >= 14:
+                    by_key[f"{rc}|{calle}|{num}"].append((lon, lat))
         print(f"  {offset + len(batch)}", flush=True)
         if not data.get("exceededTransferLimit") or not batch:
             break
@@ -327,11 +336,12 @@ def z_for(piso: str) -> float:
     return 1.5
 
 
-def load_people_by_address() -> dict[str, list[dict]]:
+def load_people_by_address(xlsx: Path | None = None) -> dict[str, list[dict]]:
     import openpyxl
 
-    print("Leyendo habitantes…", flush=True)
-    wb = openpyxl.load_workbook(HABITANTES, read_only=True, data_only=True)
+    path = Path(xlsx) if xlsx else HABITANTES
+    print(f"Leyendo habitantes… ({path.name})", flush=True)
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb.active
     headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
     idx = {h: i for i, h in enumerate(headers)}
@@ -405,24 +415,49 @@ def pick_people(
         piso,
         puerta,
     )
-    # Con planta/puerta no usar claves de solo portal (evita copiar vecinos a todos los pisos)
-    if piso or puerta:
-        keys = [k for k in keys if not is_portal_level_key(k)]
+    try:
+        hab_limit = int(row.get("HABITANTES") or 0)
+    except (TypeError, ValueError):
+        hab_limit = 0
 
-    for key in keys:
-        if key not in by_addr:
-            continue
-        seen = set()
-        out = []
-        for person in by_addr[key]:
-            sig = person_sig(person)
-            if not sig[0] or sig in seen or sig in claimed:
+    def take_from(key_list: list[str], limit: int = 0) -> list[dict]:
+        for key in key_list:
+            if key not in by_addr:
                 continue
-            seen.add(sig)
-            out.append(person)
+            seen: set[tuple] = set()
+            out: list[dict] = []
+            for person in by_addr[key]:
+                sig = person_sig(person)
+                if not sig[0] or sig in seen or sig in claimed:
+                    continue
+                seen.add(sig)
+                out.append(person)
+                if limit and len(out) >= limit:
+                    break
+            if out:
+                for person in out:
+                    claimed.add(person_sig(person))
+                return out
+        return []
+
+    # Con planta/puerta: primero claves específicas (evita copiar vecinos a todos los pisos)
+    specific = [k for k in keys if not is_portal_level_key(k)] if (piso or puerta) else keys
+    out = take_from(specific, 0)
+    if out:
+        return out
+
+    # Fallback: Excel a veces solo trae calle+número (sin DR/IZ). Repartir por HABITANTES.
+    if piso or puerta:
+        portal_keys = address_keys(
+            row.get("DireccionOriginal") or "",
+            row.get("VIA_NUMERO") or "",
+            row.get("PORTAL") or "",
+            "",
+            "",
+        )
+        portal_keys = [k for k in portal_keys if is_portal_level_key(k)]
+        out = take_from(portal_keys, hab_limit or 0)
         if out:
-            for person in out:
-                claimed.add(person_sig(person))
             return out
     return []
 
@@ -534,8 +569,8 @@ def portal_xy_for_via(via: str, row: dict, portales_xy: dict) -> tuple[float, fl
     return None
 
 
-def main():
-    by_people = load_people_by_address()
+def main(xlsx: Path | None = None):
+    by_people = load_people_by_address(xlsx)
     by_dir, by_ref, by_rc, cache, manual = load_coord_index()
     portales_xy = load_portales_xy()
 
@@ -659,8 +694,29 @@ def main():
         total_res = 0
         for vi, via in enumerate(via_names):
             items = by_via[via]
-            tipo = "unifamiliar" if len(items) == 1 else "plurifamiliar"
-            if via in via_portal:
+            # Varias fichas en la misma vía sin piso y con portal/puerta numérico = chalets, no bloque.
+            empty_piso = all(not str((r.get("PISO") or "")).strip() for r, _ in items)
+            numeric_doors = sum(
+                1
+                for r, _ in items
+                if str((r.get("PUERTA") or r.get("PORTAL") or "")).strip().isdigit()
+            )
+            chalet_cluster = (
+                len(items) >= 4
+                and empty_piso
+                and numeric_doors >= max(3, int(len(items) * 0.6))
+            )
+            tipo = "unifamiliar" if (len(items) == 1 or chalet_cluster) else "plurifamiliar"
+            # Unifamiliar (1 vivienda / RC): centroide de parcela (cache), no el portal de la calle
+            # (evita apilar Océano Atlántico 2/4 y similares en un solo punto).
+            if tipo == "unifamiliar" and len(items) == 1:
+                r0, xy0 = items[0]
+                rc0 = (r0.get("REFCAT_14") or (r0.get("ReferenciaCatastral") or "")[:14] or "").strip().upper()
+                if rc0 and rc0 in cache and len(cache[rc0]) == 2:
+                    lon, lat = float(cache[rc0][0]), float(cache[rc0][1])
+                else:
+                    lon, lat = xy0[0], xy0[1]
+            elif via in via_portal:
                 lon, lat = via_portal[via]
             elif len(via_portal) == len(via_names):
                 lon = sum(xy[0] for _, xy in items) / len(items)
@@ -750,4 +806,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Construye viviendas.geojson + personas.json")
+    parser.add_argument(
+        "--xlsx",
+        default="",
+        help="Excel de habitantes (por defecto: Habitantes a fecha 08_10_26.xlsx)",
+    )
+    args = parser.parse_args()
+    main(Path(args.xlsx) if args.xlsx else None)

@@ -3,6 +3,7 @@
 Solo archivos **seguros para GitHub**:
 
 - `limite.json` — geometría del municipio (máscara del mapa).
+- `uni_xy_overrides.json` — coordenadas por parcela (RC) para unifamiliares apilados (sin PII).
 - `chat_stats.json` — agregados del chatbot (sin PII). Regenerar en local:
 
 ```bash

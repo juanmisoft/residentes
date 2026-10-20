@@ -2,9 +2,9 @@
   "version": 1,
   "ambito": "Dentro del límite municipal de Rivas-Vaciamadrid",
   "viviendas": 35826,
-  "residentes": 106954,
-  "hombres": 52702,
-  "mujeres": 54252,
+  "residentes": 106959,
+  "hombres": 52705,
+  "mujeres": 54254,
   "extranjeros": 11622,
   "pct_extranjeros": 10.9,
   "nacionalidades_distintas": 116,
@@ -16,7 +16,7 @@
     },
     {
       "nombre": "Barrio Este",
-      "residentes": 17255,
+      "residentes": 17260,
       "edad_media": 39.5
     },
     {
@@ -34,6 +34,13 @@
     "nombre": "Barrio Oeste",
     "residentes": 44907,
     "edad_media": 40.2
+  },
+  "residente_mas_longevo": {
+    "edad": 112,
+    "personas": 1,
+    "sexo_predominante": "mujer",
+    "barrio": "Barrio Oeste",
+    "via": "CALLE JAZMIN"
   },
   "top_calles_mujeres_20_30": [
     {
@@ -178,6 +185,7 @@
   },
   "notas": {
     "unifamiliar": "Se excluyen incidencias y viviendas con 20+ residentes (posible residencia/colectivo).",
-    "calles": "Agrupación por nombre de vía (sin número de portal)."
+    "calles": "Agrupación por nombre de vía (sin número de portal).",
+    "longevo": "Solo edad y ubicación agregada; sin nombres ni documentos."
   }
 }

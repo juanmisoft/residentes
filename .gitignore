@@ -19,6 +19,7 @@
 !/data/README.md
 !/data/limite.json
 !/data/chat_stats.json
+!/data/uni_xy_overrides.json
 
 # Scripts de mantenimiento (no incluyen credenciales ni padrón)
 !/*.py

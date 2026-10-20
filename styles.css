@@ -486,13 +486,23 @@ body.street-mode .esri-view-surface {
   margin-top: 12px;
 }
 .floors {
-  margin-top: 12px;
-  padding-top: 4px;
-  border-top: 1px solid #9aabba;
-  max-height: 280px;
-  overflow: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  max-height: none;
+  overflow: visible;
 }
-.floors details { border-bottom: 1px solid #eef2f6; }
+.floors details,
+.floors .floor-group { border-bottom: 1px solid #eef2f6; }
+.floors details[open] > .floor-dwellings {
+  max-height: var(--floor-open-max, min(32vh, 260px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  margin: 0 0 6px;
+  padding: 0 0 0 10px;
+  border-left: 2px solid #d7e3ec;
+}
 .floors summary {
   display: flex;
   justify-content: space-between;
@@ -510,12 +520,13 @@ body.street-mode .esri-view-surface {
 .floors details[open] summary .floor-label::before { content: "▾ "; }
 .floors summary .floor-meta { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right; }
 .floors summary .floor-meta b { color: var(--ink); font-weight: 650; font-size: 12px; }
-.floors ul { list-style: none; margin: 0 0 6px; padding: 0 0 0 14px; }
+.floors ul,
+.floors .floor-dwellings { list-style: none; margin: 0 0 6px; padding: 0 0 0 14px; }
 .floors li {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 0;
+  gap: 4px;
+  padding: 6px 0;
   font-size: 12px;
   border-bottom: 1px solid #f1f5f9;
 }
@@ -544,26 +555,29 @@ body.street-mode .esri-view-surface {
   font-size: 11px;
   padding: 2px 7px;
 }
+/* Botonera compacta por vivienda (no pantallas enteras) */
 .floors li .floor-actions,
 .breakdown .floor-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   width: 100%;
-}
-.floors li .floor-actions:has(:only-child),
-.breakdown .floor-actions:has(:only-child) {
-  grid-template-columns: 1fr;
 }
 .floors li .floor-actions .btn-padron,
 .floors li .floor-actions .btn-catastro,
 .breakdown .floor-actions .btn-padron,
-.breakdown .floor-actions .btn-catastro {
-  width: 100%;
-  height: 32px;
-  font-size: 12px;
-  border-radius: 8px;
+.breakdown .floor-actions .btn-catastro,
+.floors li .floor-actions .btn-padron-sm,
+.floors li .floor-actions .btn-catastro-sm {
+  width: auto;
+  flex: 1 1 calc(50% - 4px);
+  min-width: 0;
+  height: 26px;
+  font-size: 11px;
+  font-weight: 650;
+  border-radius: 7px;
   margin: 0;
+  padding: 0 8px;
 }
 .floors .catastro-link,
 .popup-card .catastro-link {
@@ -607,10 +621,67 @@ body.street-mode .esri-view-surface {
 .esri-ui-top-right { top: 72px; }
 .esri-popup__main-container {
   border-radius: 10px;
-  max-width: min(360px, calc(100vw - 24px));
+  width: min(300px, calc(100vw - 24px));
+  min-width: 260px;
+  max-width: min(420px, calc(100vw - 16px));
+  min-height: 180px;
+  max-height: min(78vh, 720px);
+  overflow: hidden;
+  resize: none;
+  display: flex !important;
+  flex-direction: column !important;
+  position: relative;
 }
+.esri-popup__header {
+  flex: 0 0 auto !important;
+  position: relative;
+  z-index: 5;
+  min-height: 40px;
+  background: #fff;
+}
+.esri-popup__header-container,
+.esri-popup__button {
+  z-index: 6;
+}
+.esri-popup__content {
+  flex: 1 1 auto !important;
+  max-height: min(68vh, 600px) !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
 .esri-view .esri-popup {
   z-index: 4;
+}
+
+/* Asa inferior: estirar el emergente hacia abajo (no hacia arriba). */
+.popup-resize-handle {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 16px;
+  z-index: 2;
+  cursor: ns-resize;
+  touch-action: none;
+  background: linear-gradient(to top, rgba(15, 111, 106, 0.08), transparent);
+}
+.popup-resize-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  width: 36px;
+  height: 4px;
+  margin-left: -18px;
+  border-radius: 999px;
+  background: #9aabba;
+}
+.popup-resize-handle:hover::after,
+.popup-resize-handle:active::after {
+  background: var(--accent);
 }
 
 .intro-overlay {
@@ -719,11 +790,15 @@ body.street-mode .esri-view-surface {
 
 .intro-btn:hover { filter: brightness(1.05); }
 
+body.mobile-2d .view-toggle {
+  display: none !important;
+}
+
 @media (max-width: 980px) {
   .topbar {
-    top: 8px;
-    left: 8px;
-    right: 8px;
+    top: max(8px, env(safe-area-inset-top));
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
     grid-template-columns: 1fr auto;
     grid-template-areas:
       "brand stats"
@@ -746,27 +821,42 @@ body.street-mode .esri-view-surface {
   .search input { height: 40px; font-size: 16px; }
   .search-list { max-height: min(42vh, 320px); }
   .legend {
-    left: 8px;
-    bottom: 36px;
+    left: max(8px, env(safe-area-inset-left));
+    bottom: max(36px, calc(28px + env(safe-area-inset-bottom)));
     width: min(200px, calc(100% - 16px));
     padding: 10px 12px;
   }
   .legend-title { font-size: 11px; }
   .legend ul,
   .legend-block { font-size: 12px; }
-  .area-panel {
-    left: 8px;
-    right: 8px;
-    bottom: 8px;
+  .area-panel,
+  .chat-panel {
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    bottom: max(8px, env(safe-area-inset-bottom));
     width: auto;
     max-width: none;
   }
-  .esri-ui-top-right { top: 118px; right: 8px; }
-  .esri-ui-top-left { top: 118px; left: 8px; }
+  .chat-panel {
+    max-height: min(70vh, 520px);
+  }
+  .chat-log {
+    min-height: 120px;
+    max-height: min(36vh, 240px);
+  }
+  .chat-chip {
+    font-size: 12px;
+    padding: 7px 11px;
+  }
+  .esri-ui-top-right { top: 118px; right: max(8px, env(safe-area-inset-right)); }
+  .esri-ui-top-left { top: 118px; left: max(8px, env(safe-area-inset-left)); }
   .esri-popup__main-container {
     max-width: calc(100vw - 16px) !important;
     width: calc(100vw - 16px) !important;
+    min-width: 0 !important;
+    max-height: min(62vh, 560px) !important;
   }
+  .floors { min-height: 100px; }
   .esri-view .esri-popup {
     z-index: 6;
   }
@@ -776,10 +866,40 @@ body.street-mode .esri-view-surface {
     visibility: hidden;
     pointer-events: none;
   }
-  .floors { max-height: 36vh; }
+  .floors details[open] > .floor-dwellings {
+    max-height: var(--floor-open-max, min(28vh, 220px));
+  }
+  .esri-popup__content { max-height: min(52vh, 480px) !important; }
   .breakdown { max-height: 28vh; }
-  .intro-card { padding: 18px 16px 14px; }
+  .intro-overlay {
+    padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+    align-items: flex-start;
+    overflow: auto;
+  }
+  .intro-card {
+    padding: 18px 16px 14px;
+    margin: auto 0;
+    max-height: none;
+  }
   .intro-card h2 { font-size: 18px; }
+  .popup-stat {
+    column-gap: 8px;
+  }
+  .popup-stat-ico {
+    width: 40px;
+    height: 40px;
+  }
+  .popup-stat-label { font-size: 13px; }
+  .popup-stat-count { font-size: 30px; }
+  .popup-meta {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .popup-chips { gap: 5px; }
+  .chip {
+    font-size: 11px;
+    padding: 6px 9px;
+  }
 }
 
 @media (max-width: 560px) {
@@ -789,20 +909,33 @@ body.street-mode .esri-view-surface {
       "brand"
       "search"
       "stats";
+    gap: 8px;
+    padding: 8px 10px;
   }
   .stats {
     justify-self: stretch;
     justify-content: space-between;
     width: 100%;
+    gap: 6px;
+    padding-top: 2px;
+    border-top: 1px solid var(--line);
   }
-  .stats p { align-items: center; }
-  .brand h1 { font-size: 14px; }
-  .brand-logo { height: 28px; max-width: 140px; }
+  .stats p { align-items: center; flex: 1 1 0; min-width: 0; }
+  .stats b { font-size: 14px; }
+  .stats .stat-fecha { font-size: 13px; }
+  .stats span {
+    font-size: 9px;
+    white-space: normal;
+    line-height: 1.15;
+  }
+  .brand h1 { font-size: 13px; }
+  .brand-logo { height: 26px; max-width: 120px; }
   .legend {
     width: auto;
-    max-width: calc(100% - 64px);
+    max-width: calc(100% - 56px);
     right: auto;
-    padding: 8px 10px;
+    padding: 7px 9px;
+    bottom: max(28px, calc(20px + env(safe-area-inset-bottom)));
   }
   .legend ul {
     grid-template-columns: repeat(3, auto);
@@ -810,11 +943,14 @@ body.street-mode .esri-view-surface {
   }
   .legend-block { margin-top: 6px; }
   .esri-ui-top-right,
-  .esri-ui-top-left { top: 156px; }
+  .esri-ui-top-left { top: 168px; }
   .esri-widget--button,
   .view-toggle {
-    width: 36px;
-    height: 36px;
+    width: 40px;
+    height: 40px;
+  }
+  .esri-ui-top-right .esri-component {
+    margin-bottom: 6px;
   }
   .popup-card p {
     flex-direction: column;
@@ -827,62 +963,203 @@ body.street-mode .esri-view-surface {
     gap: 2px;
   }
   .floors summary .floor-meta { text-align: left; white-space: normal; }
+  .popup-card--sticky .popup-actions .btn-padron,
+  .popup-card--sticky .popup-actions .btn-catastro,
+  .btn-padron,
+  .btn-catastro {
+    height: 40px;
+    font-size: 14px;
+  }
+  .chat-panel {
+    max-height: min(78vh, 560px);
+    border-radius: 14px 14px 10px 10px;
+  }
+  .chat-form input { height: 40px; font-size: 16px; }
+  .chat-send { height: 40px; padding: 0 12px; }
 }
 
 /* —— Popup más legible —— */
-.esri-popup__main-container { border-radius: 14px !important; }
+.esri-popup__main-container {
+  border-radius: 14px !important;
+  resize: none !important;
+  overflow: hidden !important;
+  padding-bottom: 14px;
+}
 .esri-popup__header-title { font-size: 15px !important; font-weight: 700 !important; }
+.esri-popup__content svg.popup-ico,
+.popup-card svg.popup-ico {
+  overflow: visible !important;
+  max-width: none !important;
+  max-height: none !important;
+}
 .popup-card {
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-width: 220px;
+  box-sizing: border-box;
+  padding-bottom: 8px;
+}
+.popup-card--sticky {
+  gap: 0;
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+}
+.popup-sticky {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 2px 10px;
+  margin-bottom: 0;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+  z-index: 2;
+}
+.popup-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: var(--floors-max, min(42vh, 360px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px 0 4px;
+}
+.popup-card--sticky .popup-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 2px;
+}
+.popup-card--sticky .popup-actions:has(:only-child) {
+  grid-template-columns: 1fr;
+}
+.popup-card--sticky .popup-actions .btn-padron,
+.popup-card--sticky .popup-actions .btn-catastro {
+  height: 32px;
+  font-size: 12px;
+  border-radius: 8px;
 }
 .popup-hero {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line);
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 12px;
+  border-radius: 12px;
+  background: linear-gradient(145deg, #f0faf8 0%, #e8f4f2 55%, #f7faf9 100%);
+  border: 1px solid #d7ebe7;
 }
-.popup-hero .big {
-  font-size: 28px;
+.popup-hero-badge {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+.popup-stat {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  column-gap: 12px;
+  width: 100%;
+}
+.popup-stat-ico {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  color: var(--accent);
+  box-shadow: 0 1px 2px rgba(15, 111, 106, 0.12);
+}
+.popup-stat-ico .popup-ico { width: 24px; height: 24px; }
+.popup-stat-label {
+  min-width: 0;
+  font-size: 15px;
+  color: #3d4a57;
+  font-weight: 650;
+  line-height: 1.25;
+  text-align: left;
+}
+.popup-stat-count {
+  font-size: 36px;
   font-weight: 750;
   line-height: 1;
   color: var(--accent);
+  letter-spacing: -0.02em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
-.popup-hero .big-label {
-  font-size: 12px;
-  color: var(--muted);
-  font-weight: 600;
+.popup-meta .meta-tipo dd {
+  margin: 0;
+}
+.popup-ico {
+  display: block;
+  flex: 0 0 auto;
+  overflow: visible;
+  vertical-align: middle;
 }
 .popup-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  align-items: center;
 }
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 11px;
   border-radius: 999px;
   background: #eef6f5;
   color: var(--ink);
   font-size: 12px;
   font-weight: 600;
+  line-height: 1;
+  overflow: visible;
+  box-sizing: border-box;
+  min-height: 30px;
 }
-.chip.chip-m { background: #fce7f3; }
-.chip.chip-h { background: #dbeafe; }
-.chip.chip-age { background: #fef3c7; }
+.chip > span {
+  line-height: 1.15;
+  display: inline-block;
+}
+.chip .popup-ico {
+  width: 16px !important;
+  height: 16px !important;
+  min-width: 16px;
+  min-height: 16px;
+  overflow: visible !important;
+}
+.chip.chip-m { background: #fce7f3; color: #9d174d; }
+.chip.chip-h { background: #dbeafe; color: #1e40af; }
+.chip.chip-age { background: #fef3c7; color: #92400e; }
+.chip.chip-tipo {
+  background: #fff;
+  border: 1px solid #d7ebe7;
+  color: var(--accent);
+  font-weight: 700;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.chip.chip-tipo-pluri {
+  border-color: #c7d2fe;
+  color: #3730a3;
+  background: #eef2ff;
+}
 .popup-meta {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 12px;
+  gap: 8px 12px;
   margin: 0;
+  padding: 2px 0;
 }
-.popup-meta div { display: flex; flex-direction: column; gap: 1px; }
+.popup-meta > div { display: flex; flex-direction: column; gap: 2px; }
+.popup-meta > div:only-child { grid-column: 1 / -1; }
 .popup-meta dt { margin: 0; font-size: 11px; color: var(--muted); }
 .popup-meta dd { margin: 0; font-size: 13px; font-weight: 650; word-break: break-word; }
 .popup-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }

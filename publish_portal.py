@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """Actualiza las capas de viviendas y personas en ArcGIS Enterprise.
 
-Pide usuario y contraseña del Portal, vacía cada capa y vuelve a cargar
-los datos locales (data/viviendas.geojson + data/personas.json).
+Pide usuario y contraseña del Portal.
+
+Modos:
+  Completo (lento): vacía cada capa y vuelve a cargar todo.
+  Parcial (rápido): solo borra/reinserta los vid o ref indicados.
 
 Uso:
   python publish_portal.py
   python publish_portal.py --only viviendas
   python publish_portal.py --only personas
+  python publish_portal.py --vids 15659,15660
+  python publish_portal.py --ref 6144603VK5664S0003IQ,6144603VK5664S0004OW
 
 Variables opcionales (si existen, no pide esa parte):
   PORTAL_URL, PORTAL_USER, PORTAL_PASSWORD
@@ -224,14 +229,77 @@ def add_features(layer_url, token, features, label):
   print(f"  {label}: listo", flush=True)
 
 
-def build_vivienda_features(fmap, has_geometry):
+def delete_where(layer_url, token, where):
+  print(f"  Borrando where: {where}", flush=True)
+  payload = http_json(
+    layer_url.rstrip("/") + "/deleteFeatures",
+    data={"where": where, "token": token},
+  )
+  if payload.get("error"):
+    raise RuntimeError(payload["error"])
+  deleted = payload.get("deleteResults") or []
+  ok = sum(1 for r in deleted if r.get("success"))
+  print(f"  Borrados: {ok}", flush=True)
+
+
+def vid_where(vids):
+  """Cláusula SQL para vid numéricos o texto."""
+  nums = []
+  texts = []
+  for vid in vids:
+    s = str(vid).strip()
+    if not s:
+      continue
+    if s.isdigit():
+      nums.append(s)
+    else:
+      texts.append("'" + s.replace("'", "''") + "'")
+  parts = []
+  if nums:
+    parts.append("vid IN (" + ",".join(nums) + ")")
+  if texts:
+    parts.append("vid IN (" + ",".join(texts) + ")")
+  if not parts:
+    raise ValueError("Lista de vids vacía")
+  return " OR ".join(parts)
+
+
+def vids_from_refs(refs):
+  """Resuelve referencias catastrales → vid usando viviendas.geojson."""
+  want = {str(r).strip().upper() for r in refs if str(r).strip()}
   geo = json.loads((DATA / "viviendas.geojson").read_text(encoding="utf-8"))
+  found = []
+  for feat in geo.get("features") or []:
+    props = feat.get("properties") or {}
+    ref = str(props.get("ref") or "").strip().upper()
+    if ref not in want:
+      continue
+    vid = props.get("vid") or props.get("id")
+    if vid is not None:
+      found.append(str(vid))
+  if not found:
+    raise SystemExit("Ningún vid para las ref indicadas: " + ", ".join(sorted(want)))
+  return found
+
+
+def parse_csv_arg(value):
+  if not value:
+    return []
+  return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def build_vivienda_features(fmap, has_geometry, vids=None):
+  geo = json.loads((DATA / "viviendas.geojson").read_text(encoding="utf-8"))
+  allow = {str(v) for v in vids} if vids else None
   features = []
   for feat in geo.get("features") or []:
     props = feat.get("properties") or {}
+    vid = props.get("vid") or props.get("id")
+    if allow is not None and str(vid) not in allow:
+      continue
     coords = (feat.get("geometry") or {}).get("coordinates") or []
     attrs = {
-      "vid": props.get("vid") or props.get("id"),
+      "vid": vid,
       "id": props.get("id") or props.get("vid"),
       "direccion": props.get("direccion") or "",
       "tipo": props.get("tipo") or "",
@@ -265,10 +333,13 @@ def build_vivienda_features(fmap, has_geometry):
   return features
 
 
-def build_persona_features(fmap):
+def build_persona_features(fmap, vids=None):
   personas = json.loads((DATA / "personas.json").read_text(encoding="utf-8"))
+  allow = {str(v) for v in vids} if vids else None
   features = []
   for vid, people in personas.items():
+    if allow is not None and str(vid) not in allow:
+      continue
     for person in people or []:
       attrs = {
         "vid": int(vid) if str(vid).isdigit() else vid,
@@ -286,8 +357,9 @@ def build_persona_features(fmap):
   return features
 
 
-def update_item(portal_url, token, item_id, kind):
-  print(f"\n=== {kind} ({item_id}) ===", flush=True)
+def update_item(portal_url, token, item_id, kind, vids=None):
+  mode = "parcial" if vids else "completo"
+  print(f"\n=== {kind} ({item_id}) [{mode}] ===", flush=True)
   item = item_info(portal_url, item_id, token)
   title = item.get("title") or item_id
   print(f"  Item: {title}", flush=True)
@@ -303,11 +375,15 @@ def update_item(portal_url, token, item_id, kind):
   )
 
   if kind == "viviendas":
-    features = build_vivienda_features(fmap, has_geometry)
+    features = build_vivienda_features(fmap, has_geometry, vids=vids)
   else:
-    features = build_persona_features(fmap)
+    features = build_persona_features(fmap, vids=vids)
 
-  delete_all(layer_url, token)
+  if vids:
+    print(f"  Vids a parchear: {', '.join(str(v) for v in vids)}", flush=True)
+    delete_where(layer_url, token, vid_where(vids))
+  else:
+    delete_all(layer_url, token)
   add_features(layer_url, token, features, kind)
   print(f"  Conteo en servicio: {query_count(layer_url, token)}", flush=True)
 
@@ -331,10 +407,31 @@ def main():
     default="both",
     help="Qué capa actualizar",
   )
+  parser.add_argument(
+    "--vids",
+    default="",
+    help="Solo estos vid (coma-separados). Mucho más rápido que republicar todo.",
+  )
+  parser.add_argument(
+    "--ref",
+    default="",
+    help="Solo estas ref. catastrales (coma-separadas); se resuelven a vid.",
+  )
+  parser.add_argument(
+    "--yes",
+    action="store_true",
+    help="En modo completo, no pedir confirmación SI (sigue pidiendo login).",
+  )
   args = parser.parse_args()
 
   if not (DATA / "viviendas.geojson").exists() or not (DATA / "personas.json").exists():
     raise SystemExit("Faltan data/viviendas.geojson o data/personas.json. Ejecuta build_padron_visor.py antes.")
+
+  vids = parse_csv_arg(args.vids)
+  refs = parse_csv_arg(args.ref)
+  if refs:
+    vids = list(dict.fromkeys(vids + vids_from_refs(refs)))
+  vids = list(dict.fromkeys(vids)) or None
 
   cfg = load_config()
   portal = cfg["portalUrl"]
@@ -343,6 +440,20 @@ def main():
   if not viv_id or not per_id:
     raise SystemExit("Faltan viviendasItemId / personasItemId en config.js")
 
+  if vids:
+    print(f"Modo parcial: {len(vids)} vivienda(s) → {', '.join(vids)}", flush=True)
+  else:
+    print("Modo completo: se vaciarán y recargarán las capas enteras.", flush=True)
+    print(
+      "AVISO: no interrumpas este proceso. Si se corta a mitad, la capa puede\n"
+      "quedar vacía o incompleta y 'desaparecerán' viviendas en el mapa.",
+      flush=True,
+    )
+    if not args.yes:
+      confirm = input("Escribe SI para continuar con la carga completa: ").strip()
+      if confirm.upper() not in {"SI", "SÍ", "YES", "Y"}:
+        raise SystemExit("Cancelado.")
+
   user, password = prompt_auth(portal)
   print("Autenticando…", flush=True)
   token = generate_token(portal, user, password)
@@ -350,9 +461,9 @@ def main():
 
   try:
     if args.only in ("viviendas", "both"):
-      update_item(portal, token, viv_id, "viviendas")
+      update_item(portal, token, viv_id, "viviendas", vids=vids)
     if args.only in ("personas", "both"):
-      update_item(portal, token, per_id, "personas")
+      update_item(portal, token, per_id, "personas", vids=vids)
   except Exception as exc:  # noqa: BLE001
     print(f"\nERROR: {exc}", file=sys.stderr, flush=True)
     raise SystemExit(1) from exc

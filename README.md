@@ -34,7 +34,26 @@ Abre `http://127.0.0.1:8765/` e inicia sesión en el Portal.
 2. En `config.js`: `"dataSource": "local"` (no subas ese cambio si el remoto debe ser portal).
 3. Regenera agregados del chat: `python build_chat_stats.py`.
 
-## Actualizar capas del Portal
+## Actualizar el padrón (nuevo Excel de Habitantes)
+
+Cuando te den un fichero más reciente (`Habitantes a fecha ….xlsx`):
+
+1. Cópialo a la carpeta del proyecto.
+2. Ejecuta **un solo comando**:
+
+```bash
+python actualizar_padron.py "Habitantes a fecha 15_11_26.xlsx" --publish
+```
+
+(Si omites la ruta, usa el `Habitantes*.xlsx` más reciente de la carpeta.)
+
+Por detrás hace: cruce Catastro/portales → geojson/personas → stats del chat → fecha en `config.js` → publicación al Portal (pide login).
+
+- Solo regenerar en local (sin Portal): quita `--publish` y luego `python publish_portal.py` cuando quieras.
+- Si las viviendas/refs no han cambiado y solo quieres refrescar personas: `--skip-enriquecer` (más rápido).
+- Parche de pocas viviendas (sin republicar todo): `python publish_portal.py --vids 15659,15660`
+
+## Actualizar capas del Portal (completo)
 
 ```bash
 python publish_portal.py

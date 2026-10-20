@@ -127,6 +127,8 @@ def main() -> None:
     total_personas = 0
     hombres = 0
     mujeres = 0
+    edad_max = None
+    longevos: list[dict] = []
 
     uni_ranking = []
     canada_viviendas = 0
@@ -177,6 +179,18 @@ def main() -> None:
                 barrio_edad_sum[bname] += edad_i
                 barrio_edad_n[bname] += 1
                 barrio_res[bname] += 1
+            if edad_i is not None:
+                if edad_max is None or edad_i > edad_max:
+                    edad_max = edad_i
+                    longevos = []
+                if edad_i == edad_max:
+                    longevos.append(
+                        {
+                            "sexo": "mujer" if sexo == "M" else ("hombre" if sexo == "H" else None),
+                            "barrio": bname,
+                            "via": via,
+                        }
+                    )
             if sexo == "M" and edad_i is not None and 20 <= edad_i <= 30:
                 mujeres_20_30_via[via] += 1
             nac = (pers.get("nacionalidad") or "").strip()
@@ -208,6 +222,19 @@ def main() -> None:
         {"nacionalidad": nac, "residentes": n} for nac, n in nac_ext.most_common(15)
     ]
 
+    longevo_payload = None
+    if edad_max is not None and longevos:
+        sexos = Counter(x["sexo"] for x in longevos if x.get("sexo"))
+        barrios_lon = Counter(x["barrio"] for x in longevos if x.get("barrio"))
+        vias_lon = Counter(x["via"] for x in longevos if x.get("via"))
+        longevo_payload = {
+            "edad": edad_max,
+            "personas": len(longevos),
+            "sexo_predominante": sexos.most_common(1)[0][0] if sexos else None,
+            "barrio": barrios_lon.most_common(1)[0][0] if barrios_lon else None,
+            "via": vias_lon.most_common(1)[0][0] if vias_lon else None,
+        }
+
     payload = {
         "version": 1,
         "ambito": "Dentro del límite municipal de Rivas-Vaciamadrid",
@@ -221,6 +248,7 @@ def main() -> None:
         "barrios": barrios,
         "barrio_mas_joven": mas_joven,
         "barrio_mas_envejecido": mas_viejo,
+        "residente_mas_longevo": longevo_payload,
         "top_calles_mujeres_20_30": top_calles_m2030,
         "unifamiliar_mas_residentes": top_uni[0] if top_uni else None,
         "top_unifamiliares": top_uni,
@@ -236,6 +264,7 @@ def main() -> None:
                 "(posible residencia/colectivo)."
             ),
             "calles": "Agrupación por nombre de vía (sin número de portal).",
+            "longevo": "Solo edad y ubicación agregada; sin nombres ni documentos.",
         },
     }
     OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -243,7 +272,7 @@ def main() -> None:
     print(
         f"  residentes={total_personas} extranjeros={extranjeros} "
         f"canada={canada_personas or canada_residentes_campo} viv={canada_viviendas} "
-        f"joven={mas_joven} viejo={mas_viejo}"
+        f"joven={mas_joven} viejo={mas_viejo} longevo={longevo_payload}"
     )
     if top_uni:
         print(f"  uni max: {top_uni[0]}")
