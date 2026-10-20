@@ -3819,6 +3819,14 @@ require([
     openPadron(vids, meta);
   });
 
+  /** En 2D/móvil la SceneLayer de edificios no está en el mapa: .when() no termina nunca. */
+  function buildingsReady() {
+    if (preferFlatBoot || (view && view.type === "2d") || !map.layers.includes(buildingsLayer)) {
+      return Promise.resolve();
+    }
+    return buildingsLayer.when().catch(function () { return null; });
+  }
+
   const boot = USE_PORTAL
     ? ensurePortalSignIn().then(function () {
       const loadingP = document.querySelector("#loading p");
@@ -3827,7 +3835,7 @@ require([
         loadViviendasCollection(),
         loadLimite(),
         view.when(),
-        buildingsLayer.when(),
+        buildingsReady(),
         parcelasLayer.when().then(function () { parcelasOk = true; }).catch(function () { parcelasOk = false; }),
         ensurePersonasLayer()
       ]);
@@ -3837,7 +3845,7 @@ require([
       loadViviendasCollection(),
       loadLimite(),
       view.when(),
-      buildingsLayer.when(),
+      buildingsReady(),
       parcelasLayer.when().then(function () { parcelasOk = true; }).catch(function () { parcelasOk = false; })
     ]);
 
