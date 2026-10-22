@@ -185,6 +185,33 @@ html, body, #viewDiv {
   text-transform: uppercase;
 }
 
+.search-list .search-more {
+  position: sticky;
+  bottom: 0;
+  margin-top: 2px;
+  background: #fff;
+  border-top: 1px solid var(--line);
+}
+
+.search-list .search-more button {
+  width: 100%;
+  text-align: center;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 10px;
+}
+
+.search-list .search-more button:hover {
+  background: #e7f3f2;
+}
+
+.search-list .search-more.is-done {
+  text-align: center;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 #btnArea.is-active,
 #btnArea.is-active:hover,
 #btnStreet.is-active,

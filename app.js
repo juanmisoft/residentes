@@ -2318,14 +2318,17 @@ require([
 
   const searchInput = document.getElementById("searchInput");
   const searchList = document.getElementById("searchList");
+  const SEARCH_PAGE = 40;
   let buildingByVid = {};
   let searchSeq = 0;
   let searchTimer = null;
+  let searchShown = 0;
 
   function hideSearch() {
     searchList.hidden = true;
     searchList.innerHTML = "";
     searchList._matches = null;
+    searchShown = 0;
   }
 
   function foldText(text) {
@@ -2494,6 +2497,10 @@ require([
     });
   }
 
+  function peopleNameTokens(query) {
+    return foldText(query).split(" ").filter(function (t) { return t.length >= 2; });
+  }
+
   function peopleWhereClause(query) {
     const q = query.trim();
     if (looksLikeDni(q)) {
@@ -2501,10 +2508,71 @@ require([
       if (compact.length < 4) return null;
       return "UPPER(dni) LIKE '%" + sqlEscape(compact) + "%'";
     }
-    const tokens = foldText(q).split(" ").filter(function (t) { return t.length >= 2; });
+    const tokens = peopleNameTokens(q);
     if (!tokens.length || foldText(q).length < 3) return null;
-    // Primera palabra en el servicio; el resto se filtra en cliente (acentos).
-    return "UPPER(nombre) LIKE '%" + sqlEscape(tokens[0]) + "%'";
+    // Todas las palabras en el servicio (AND). Si solo se usa la primera
+    // ("JUAN"), el tope del FeatureServer corta antes de apellidos como ROJAS.
+    return tokens
+      .map(function (t) { return "UPPER(nombre) LIKE '%" + sqlEscape(t) + "%'"; })
+      .join(" AND ");
+  }
+
+  function personMatchScore(nombre, query) {
+    const name = foldText(nombre || "");
+    const tokens = peopleNameTokens(query);
+    if (!tokens.length) return 0;
+    let score = 0;
+    const joined = tokens.join(" ");
+    if (name === joined) score += 1000;
+    if (name.indexOf(joined) === 0) score += 400;
+    if (name.indexOf(joined) !== -1) score += 200;
+    tokens.forEach(function (t, i) {
+      // Coincidencia de palabra completa (apellido) vale más que subcadena
+      const wordRe = new RegExp("(^|\\s)" + t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(\\s|$)");
+      if (wordRe.test(name)) score += 80 - i;
+      else if (name.indexOf(t) !== -1) score += 40 - i;
+    });
+    return score;
+  }
+
+  function queryPeopleByWhere(layer, where) {
+    const pageSize = Math.min(
+      (layer.capabilities && layer.capabilities.query && layer.capabilities.query.maxRecordCount) || 2000,
+      2000
+    );
+    const outFields = ["vid", "nombre", "dni", "sexo", "edad"];
+    return layer.queryFeatureCount({ where: where }).then(function (count) {
+      const total = Number(count) || 0;
+      if (!total) return [];
+      const pages = Math.ceil(total / pageSize);
+      const tasks = [];
+      for (let i = 0; i < pages; i++) {
+        tasks.push(layer.queryFeatures({
+          where: where,
+          outFields: outFields,
+          returnGeometry: false,
+          orderByFields: ["nombre ASC"],
+          start: i * pageSize,
+          num: pageSize
+        }));
+      }
+      return Promise.all(tasks).then(function (results) {
+        const people = [];
+        results.forEach(function (res) {
+          (res.features || []).forEach(function (g) {
+            const a = g.attributes || {};
+            people.push({
+              vid: fieldVal(a, ["vid"]),
+              nombre: fieldVal(a, ["nombre"]) || "",
+              dni: fieldVal(a, ["dni", "Identificador"]) || "",
+              edad: fieldVal(a, ["edad"]),
+              sexo: fieldVal(a, ["sexo"]) || ""
+            });
+          });
+        });
+        return people;
+      });
+    });
   }
 
   function findPeopleMatches(query) {
@@ -2516,6 +2584,7 @@ require([
     const toRows = function (people) {
       const rows = [];
       const seen = {};
+      const tokens = peopleNameTokens(q);
       filterPeopleByQuery(people, q).forEach(function (person) {
         const vid = person.vid;
         if (vid == null || vid === "") return;
@@ -2524,12 +2593,22 @@ require([
         const row = personRowFromHit(person, vid);
         if (!row) return;
         seen[key] = true;
+        row._score = personMatchScore(person.nombre, q);
         rows.push(row);
       });
-      rows.sort(function (a, b) {
-        return String(a.label).localeCompare(String(b.label), "es");
-      });
-      return rows.slice(0, 15);
+      // 1 apellido/nombre → alfabético (no perder ALVARO entre cientos de ROJAS).
+      // Nombre completo → relevancia primero.
+      if (tokens.length <= 1 && !looksLikeDni(q)) {
+        rows.sort(function (a, b) {
+          return String(a.label).localeCompare(String(b.label), "es");
+        });
+      } else {
+        rows.sort(function (a, b) {
+          if (b._score !== a._score) return b._score - a._score;
+          return String(a.label).localeCompare(String(b.label), "es");
+        });
+      }
+      return rows;
     };
 
     if (!USE_PORTAL) {
@@ -2553,23 +2632,8 @@ require([
     const where = peopleWhereClause(q);
     if (!where) return Promise.resolve([]);
     return ensurePersonasLayer().then(function (layer) {
-      return layer.queryFeatures({
-        where: where,
-        outFields: ["vid", "nombre", "dni", "sexo", "edad"],
-        returnGeometry: false,
-        resultRecordCount: 80
-      });
-    }).then(function (res) {
-      const people = (res.features || []).map(function (g) {
-        const a = g.attributes || {};
-        return {
-          vid: fieldVal(a, ["vid"]),
-          nombre: fieldVal(a, ["nombre"]) || "",
-          dni: fieldVal(a, ["dni", "Identificador"]) || "",
-          edad: fieldVal(a, ["edad"]),
-          sexo: fieldVal(a, ["sexo"]) || ""
-        };
-      });
+      return queryPeopleByWhere(layer, where);
+    }).then(function (people) {
       return toRows(people);
     }).catch(function (err) {
       console.warn("Búsqueda de personas", err);
@@ -2577,24 +2641,60 @@ require([
     });
   }
 
+  function searchRowHtml(row, index) {
+    const badge = row.kind === "person" ? "<small class='search-kind'>Persona</small>" : "";
+    return (
+      "<li><button type='button' data-index='" + index + "'>" +
+      badge +
+      esc(row.label) +
+      "<small>" + esc(row.detail) + "</small></button></li>"
+    );
+  }
+
+  function paintSearchFooter(all) {
+    const old = searchList.querySelector(".search-more");
+    if (old) old.remove();
+    if (searchShown < all.length) {
+      searchList.insertAdjacentHTML(
+        "beforeend",
+        "<li class='search-more'>" +
+          "<button type='button' data-more='1'>Mostrar más · " +
+          searchShown + " de " + all.length +
+          "</button></li>"
+      );
+    } else if (all.length > SEARCH_PAGE) {
+      searchList.insertAdjacentHTML(
+        "beforeend",
+        "<li class='search-more is-done'><span>" + all.length + " resultados</span></li>"
+      );
+    }
+  }
+
   function paintSearchMatches(matches) {
     if (!matches.length) {
       hideSearch();
       return;
     }
-    searchList.innerHTML = matches
-      .map(function (row, index) {
-        const badge = row.kind === "person" ? "<small class='search-kind'>Persona</small>" : "";
-        return (
-          "<li><button type='button' data-index='" + index + "'>" +
-          badge +
-          esc(row.label) +
-          "<small>" + esc(row.detail) + "</small></button></li>"
-        );
-      })
-      .join("");
-    searchList.hidden = false;
     searchList._matches = matches;
+    searchShown = 0;
+    searchList.innerHTML = "";
+    searchList.hidden = false;
+    appendSearchPage();
+  }
+
+  function appendSearchPage() {
+    const all = searchList._matches;
+    if (!all || !all.length) return;
+    const next = Math.min(searchShown + SEARCH_PAGE, all.length);
+    let html = "";
+    for (let i = searchShown; i < next; i++) {
+      html += searchRowHtml(all[i], i);
+    }
+    const foot = searchList.querySelector(".search-more");
+    if (foot) foot.remove();
+    searchList.insertAdjacentHTML("beforeend", html);
+    searchShown = next;
+    paintSearchFooter(all);
   }
 
   function renderSearch(query) {
@@ -2619,7 +2719,7 @@ require([
         seenAddr[key] = true;
         merged.push(row);
       });
-      paintSearchMatches(merged.slice(0, 25));
+      paintSearchMatches(merged);
     });
   }
 
@@ -2631,8 +2731,21 @@ require([
     }, 220);
   });
 
+  searchList.addEventListener("scroll", function () {
+    if (!searchList._matches || searchShown >= searchList._matches.length) return;
+    if (searchList.scrollTop + searchList.clientHeight >= searchList.scrollHeight - 48) {
+      appendSearchPage();
+    }
+  });
+
   searchList.addEventListener("click", function (event) {
-    const button = event.target.closest("button");
+    const moreBtn = event.target.closest("button[data-more]");
+    if (moreBtn) {
+      event.preventDefault();
+      appendSearchPage();
+      return;
+    }
+    const button = event.target.closest("button[data-index]");
     if (!button || !searchList._matches) return;
     const row = searchList._matches[Number(button.dataset.index)];
     if (!row || !row.building) return;
