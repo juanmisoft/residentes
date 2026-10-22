@@ -2318,10 +2318,48 @@ require([
 
   const searchInput = document.getElementById("searchInput");
   const searchList = document.getElementById("searchList");
+  let buildingByVid = {};
+  let searchSeq = 0;
+  let searchTimer = null;
 
   function hideSearch() {
     searchList.hidden = true;
     searchList.innerHTML = "";
+    searchList._matches = null;
+  }
+
+  function foldText(text) {
+    return String(text || "")
+      .toUpperCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function sqlEscape(text) {
+    return String(text || "").replace(/'/g, "''");
+  }
+
+  function rebuildBuildingIndex() {
+    buildingByVid = {};
+    function register(vid, building, unidad) {
+      if (vid == null || vid === "") return;
+      const key = String(vid);
+      if (!buildingByVid[key]) {
+        buildingByVid[key] = { building: building, unidad: unidad || null };
+      }
+    }
+    (edificios || []).forEach(function (building) {
+      if (building.vid != null) register(building.vid, building, null);
+      (building.vids || []).forEach(function (vid) { register(vid, building, null); });
+      (building.unidades || []).forEach(function (unidad) {
+        if (unidad.vid != null) register(unidad.vid, building, unidad);
+      });
+      (building.casas || []).forEach(function (casa) {
+        if (casa.vid != null) register(casa.vid, building, casa);
+      });
+    });
   }
 
   function addressParts(text) {
@@ -2336,6 +2374,11 @@ require([
       suffix: match[3].toUpperCase(),
       label: label
     };
+  }
+
+  function looksLikeDni(query) {
+    const compact = String(query || "").replace(/[\s.\-_/]/g, "");
+    return /^\d{4,10}[A-Za-z]?$/i.test(compact);
   }
 
   function rowsOf(building) {
@@ -2358,7 +2401,7 @@ require([
           const detail = group.viviendas === 1
             ? group.residentes + " residentes · unifamiliar"
             : group.residentes + " residentes · " + group.viviendas + " viviendas";
-          return { building: building, label: label, detail: detail, parts: addressParts(label) };
+          return { kind: "address", building: building, label: label, detail: detail, parts: addressParts(label) };
         });
       }
     }
@@ -2368,6 +2411,7 @@ require([
         ? building.residentes + " residentes · unifamiliar"
         : building.residentes + " residentes · " + building.viviendas + " viviendas";
     return [{
+      kind: "address",
       building: building,
       label: building.direccion,
       detail: detail,
@@ -2375,12 +2419,9 @@ require([
     }];
   }
 
-  function renderSearch(query) {
+  function findAddressMatches(query) {
     const q = query.trim().toUpperCase();
-    if (q.length < 2) {
-      hideSearch();
-      return;
-    }
+    if (q.length < 2 || looksLikeDni(q)) return [];
     const qParts = addressParts(q);
     const qHasNumber = /\s\d+[A-Za-z]?$/.test(q);
     const qStreet = qHasNumber ? qParts.street : q;
@@ -2407,14 +2448,146 @@ require([
       if (bySuffix) return bySuffix;
       return a.label.localeCompare(b.label, "es");
     });
+    return matches.slice(0, 20);
+  }
+
+  function personRowFromHit(person, vid) {
+    const hit = buildingByVid[String(vid)];
+    if (!hit || !hit.building) return null;
+    const building = hit.building;
+    const unidad = hit.unidad;
+    const address = (unidad && unidad.direccion) || building.direccion || "";
+    const planta = unidad && unidad.planta && unidad.planta !== "Unifamiliar" ? unidad.planta : "";
+    const letra = (unidad && (unidad.letra || unidad.puerta)) || "";
+    const bits = [address];
+    if (planta) bits.push(plantaLabel(planta));
+    if (letra) bits.push(letra);
+    if (person.edad != null && person.edad !== "") bits.push(person.edad + " años");
+    const dni = String(person.dni || "").trim();
+    if (dni) bits.push("Doc. " + dni);
+    return {
+      kind: "person",
+      building: building,
+      unidad: unidad,
+      vid: vid,
+      label: person.nombre || "Sin nombre",
+      address: address,
+      detail: bits.filter(Boolean).join(" · "),
+      parts: addressParts(address)
+    };
+  }
+
+  function filterPeopleByQuery(people, query) {
+    const q = query.trim();
+    if (!q) return [];
+    if (looksLikeDni(q)) {
+      const needle = foldText(q.replace(/[\s.\-_/]/g, ""));
+      return people.filter(function (p) {
+        return foldText(String(p.dni || "").replace(/[\s.\-_/]/g, "")).indexOf(needle) !== -1;
+      });
+    }
+    const tokens = foldText(q).split(" ").filter(function (t) { return t.length >= 2; });
+    if (!tokens.length) return [];
+    return people.filter(function (p) {
+      const name = foldText(p.nombre || "");
+      return tokens.every(function (t) { return name.indexOf(t) !== -1; });
+    });
+  }
+
+  function peopleWhereClause(query) {
+    const q = query.trim();
+    if (looksLikeDni(q)) {
+      const compact = q.replace(/[\s.\-_/]/g, "").toUpperCase();
+      if (compact.length < 4) return null;
+      return "UPPER(dni) LIKE '%" + sqlEscape(compact) + "%'";
+    }
+    const tokens = foldText(q).split(" ").filter(function (t) { return t.length >= 2; });
+    if (!tokens.length || foldText(q).length < 3) return null;
+    // Primera palabra en el servicio; el resto se filtra en cliente (acentos).
+    return "UPPER(nombre) LIKE '%" + sqlEscape(tokens[0]) + "%'";
+  }
+
+  function findPeopleMatches(query) {
+    const q = query.trim();
+    if (q.length < 3 && !looksLikeDni(q)) return Promise.resolve([]);
+    if (looksLikeDni(q) && q.replace(/[\s.\-_/]/g, "").length < 4) return Promise.resolve([]);
+    if (!Object.keys(buildingByVid).length) return Promise.resolve([]);
+
+    const toRows = function (people) {
+      const rows = [];
+      const seen = {};
+      filterPeopleByQuery(people, q).forEach(function (person) {
+        const vid = person.vid;
+        if (vid == null || vid === "") return;
+        const key = String(vid) + "|" + foldText(person.nombre) + "|" + foldText(person.dni);
+        if (seen[key]) return;
+        const row = personRowFromHit(person, vid);
+        if (!row) return;
+        seen[key] = true;
+        rows.push(row);
+      });
+      rows.sort(function (a, b) {
+        return String(a.label).localeCompare(String(b.label), "es");
+      });
+      return rows.slice(0, 15);
+    };
+
+    if (!USE_PORTAL) {
+      return loadPersonasLocal().then(function (db) {
+        const people = [];
+        Object.keys(db || {}).forEach(function (vid) {
+          (db[vid] || []).forEach(function (p) {
+            people.push({
+              vid: vid,
+              nombre: p.nombre || "",
+              dni: p.dni || "",
+              edad: p.edad,
+              sexo: p.sexo
+            });
+          });
+        });
+        return toRows(people);
+      }).catch(function () { return []; });
+    }
+
+    const where = peopleWhereClause(q);
+    if (!where) return Promise.resolve([]);
+    return ensurePersonasLayer().then(function (layer) {
+      return layer.queryFeatures({
+        where: where,
+        outFields: ["vid", "nombre", "dni", "sexo", "edad"],
+        returnGeometry: false,
+        resultRecordCount: 80
+      });
+    }).then(function (res) {
+      const people = (res.features || []).map(function (g) {
+        const a = g.attributes || {};
+        return {
+          vid: fieldVal(a, ["vid"]),
+          nombre: fieldVal(a, ["nombre"]) || "",
+          dni: fieldVal(a, ["dni", "Identificador"]) || "",
+          edad: fieldVal(a, ["edad"]),
+          sexo: fieldVal(a, ["sexo"]) || ""
+        };
+      });
+      return toRows(people);
+    }).catch(function (err) {
+      console.warn("Búsqueda de personas", err);
+      return [];
+    });
+  }
+
+  function paintSearchMatches(matches) {
     if (!matches.length) {
       hideSearch();
       return;
     }
     searchList.innerHTML = matches
       .map(function (row, index) {
+        const badge = row.kind === "person" ? "<small class='search-kind'>Persona</small>" : "";
         return (
           "<li><button type='button' data-index='" + index + "'>" +
+          badge +
           esc(row.label) +
           "<small>" + esc(row.detail) + "</small></button></li>"
         );
@@ -2424,17 +2597,60 @@ require([
     searchList._matches = matches;
   }
 
+  function renderSearch(query) {
+    const seq = ++searchSeq;
+    const q = String(query || "").trim();
+    if (q.length < 2) {
+      hideSearch();
+      return;
+    }
+    const addressMatches = findAddressMatches(q);
+    if (addressMatches.length) paintSearchMatches(addressMatches);
+    findPeopleMatches(q).then(function (peopleMatches) {
+      if (seq !== searchSeq) return;
+      const seenAddr = {};
+      const merged = [];
+      peopleMatches.forEach(function (row) {
+        merged.push(row);
+      });
+      addressMatches.forEach(function (row) {
+        const key = "a|" + String(row.label || "").toUpperCase() + "|" + (row.building && row.building.rc || "");
+        if (seenAddr[key]) return;
+        seenAddr[key] = true;
+        merged.push(row);
+      });
+      paintSearchMatches(merged.slice(0, 25));
+    });
+  }
+
   searchInput.addEventListener("input", function () {
-    renderSearch(searchInput.value);
+    const value = searchInput.value;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () {
+      renderSearch(value);
+    }, 220);
   });
 
   searchList.addEventListener("click", function (event) {
     const button = event.target.closest("button");
     if (!button || !searchList._matches) return;
     const row = searchList._matches[Number(button.dataset.index)];
-    searchInput.value = row.label;
+    if (!row || !row.building) return;
+    searchInput.value = row.kind === "person" ? (row.label || "") : (row.label || "");
     hideSearch();
-    showBuilding(row.building, row.label);
+    const address = row.kind === "person" ? (row.address || row.label) : row.label;
+    showBuilding(row.building, address);
+    if (row.kind === "person" && row.vid != null) {
+      const meta = {
+        direccion: row.address || "",
+        portal: (row.unidad && row.unidad.portal) || row.building.portal || "",
+        portalKind: (row.unidad && row.unidad.portalKind) || row.building.portalKind || "Portal",
+        planta: (row.unidad && row.unidad.planta === "Unifamiliar") ? "" : ((row.unidad && row.unidad.planta) || ""),
+        letra: (row.unidad && (row.unidad.letra || row.unidad.puerta)) || row.building.letra || "",
+        ref: (row.unidad && row.unidad.ref) || row.building.ref || row.building.rc || ""
+      };
+      openPadron([row.vid], meta);
+    }
   });
 
   document.addEventListener("click", function (event) {
@@ -3913,6 +4129,7 @@ require([
         };
       });
       const layers = buildPointLayers(split.features);
+      rebuildBuildingIndex();
       incRenderer3d = {
         type: "simple",
         symbol: new PointSymbol3D({

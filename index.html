@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Residentes por vivienda · Rivas-Vaciamadrid</title>
   <link rel="stylesheet" href="https://js.arcgis.com/4.33/esri/themes/light/main.css" />
-  <link rel="stylesheet" href="styles.css?v=98" />
+  <link rel="stylesheet" href="styles.css?v=99" />
 </head>
 <body>
   <div id="viewDiv"></div>
@@ -17,7 +17,7 @@
     </div>
 
     <div class="search" id="searchBox">
-      <input id="searchInput" type="search" placeholder="Ejemplo: Calle Beguinas 2" autocomplete="off" enterkeyhint="search" />
+      <input id="searchInput" type="search" placeholder="Calle, nombre y apellidos o DNI" autocomplete="off" enterkeyhint="search" />
       <ul id="searchList" class="search-list" hidden></ul>
     </div>
 
@@ -139,7 +139,7 @@
       <h2 id="introTitle">Cómo usar este mapa</h2>
       <p class="intro-lead">Consulta el padrón municipal de Rivas-Vaciamadrid por vivienda. Los datos se cargan del Portal (inicio de sesión de la organización). Arriba verás la <strong>fecha del padrón</strong> y los totales de viviendas, residentes y parcelas.</p>
       <ul class="intro-list">
-        <li><strong>Buscar una dirección</strong> en la barra superior.</li>
+        <li><strong>Buscar</strong> por dirección, <em>nombre y apellidos</em> o <em>DNI</em> en la barra superior.</li>
         <li><strong>Tocar un punto</strong> para ver el resumen. En el emergente, <em>Ver padrón</em> abre la ficha de residentes (nombre, edad, sexo, nacionalidad).</li>
         <li><strong>Rombos naranjas</strong>: incidencias (sin ref. catastral o portal), p. ej. Cañada Real; la posición es aproximada.</li>
         <li><strong>Dibujar un área</strong> para sumar viviendas y residentes de esa zona.</li>
@@ -156,7 +156,7 @@
   </div>
 
   <script src="https://js.arcgis.com/4.33/"></script>
-  <script src="config.js?v=4"></script>
-  <script src="app.js?v=147"></script>
+  <script src="config.js?v=5"></script>
+  <script src="app.js?v=148"></script>
 </body>
 </html>
