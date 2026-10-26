@@ -56,6 +56,7 @@ require([
   const PORTAL_URL = APP_CFG.portalUrl || "https://sit.rivasciudad.es/portal";
   const VIVIENDAS_ITEM_ID = APP_CFG.viviendasItemId || "";
   const PERSONAS_ITEM_ID = APP_CFG.personasItemId || "";
+  const BARRIOS_ITEM_ID = APP_CFG.barriosItemId || "c2cd53a576504626b6c655c07ec95208";
   const FECHA_PADRON = APP_CFG.fechaPadron || "";
   if (USE_PORTAL && PORTAL_URL) {
     esriConfig.portalUrl = PORTAL_URL;
@@ -641,9 +642,9 @@ require([
     listMode: "hide"
   });
 
-  // https://sit.rivasciudad.es/portal/home/item.html?id=c2cd53a576504626b6c655c07ec95208
+  // Portal item: https://sit.rivasciudad.es/portal/home/item.html?id=c2cd53a576504626b6c655c07ec95208
   const barriosLayer = new FeatureLayer({
-    url: "https://sit.rivasciudad.es/server/rest/services/BARRIOS_POR_N_VIV_2020/FeatureServer/0",
+    portalItem: { id: BARRIOS_ITEM_ID },
     title: "Barrios",
     outFields: ["*"],
     visible: false,
