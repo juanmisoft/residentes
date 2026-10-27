@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Residentes por vivienda · Rivas-Vaciamadrid</title>
   <link rel="stylesheet" href="https://js.arcgis.com/4.33/esri/themes/light/main.css" />
-  <link rel="stylesheet" href="styles.css?v=100" />
+  <link rel="stylesheet" href="styles.css?v=101" />
 </head>
 <body>
   <div id="viewDiv"></div>
@@ -55,7 +55,10 @@
   <button id="btnChat" class="esri-widget esri-widget--button btn-chat" type="button" title="Consultas del padrón" aria-label="Consultas del padrón" aria-pressed="false">
     <span class="esri-icon-comment" aria-hidden="true"></span>
   </button>
-  <button id="btnView" class="esri-widget esri-widget--button view-toggle" type="button" title="Vista 2D" aria-label="Vista 2D">2D</button>
+  <button id="btnDash" class="esri-widget esri-widget--button btn-dash" type="button" title="Cuadro de mando" aria-label="Cuadro de mando" aria-pressed="false">
+    <span class="esri-icon-dashboard" aria-hidden="true"></span>
+  </button>
+  <button id="btnView" class="esri-widget esri-widget--button view-toggle" type="button" title="Vista 3D" aria-label="Vista 3D">3D</button>
   <button id="btnHelp" class="esri-widget esri-widget--button help-btn" type="button" title="Cómo usar el mapa" aria-label="Cómo usar el mapa">?</button>
 
   <aside id="areaPanel" class="area-panel" hidden>
@@ -96,6 +99,52 @@
       <input id="chatInput" type="text" placeholder="Elige una pregunta o escribe una clave…" />
       <button type="submit" class="chat-send">Preguntar</button>
     </form>
+  </aside>
+
+  <aside id="dashPanel" class="dash-panel" hidden aria-label="Cuadro de mando">
+    <div class="dash-head">
+      <div>
+        <p class="legend-title">Cuadro de mando</p>
+        <p class="chat-sub">Pulsa tipología o barrio para filtrar el mapa</p>
+      </div>
+      <div class="dash-head-actions">
+        <button id="btnDashClear" class="area-clear" type="button" hidden>Quitar filtro</button>
+        <button id="btnDashClose" class="area-clear" type="button" aria-label="Cerrar">Cerrar</button>
+      </div>
+    </div>
+    <div id="dashFilterNote" class="dash-filter-note" hidden></div>
+    <div class="dash-grid">
+      <article class="dash-card" id="dashTipoCard">
+        <h3>Tipología y nº de viviendas</h3>
+        <div class="dash-chart-row">
+          <div id="dashTipoChart" class="dash-chart" role="img" aria-label="Tipología de viviendas"></div>
+          <ul id="dashTipoLegend" class="dash-legend"></ul>
+        </div>
+      </article>
+      <article class="dash-card dash-kpi">
+        <h3>Total viviendas</h3>
+        <p id="dashTotalViv" class="dash-kpi-value">—</p>
+      </article>
+      <article class="dash-card" id="dashPobCard">
+        <h3>Población por tipología</h3>
+        <div id="dashPobChart" class="dash-bars" role="img" aria-label="Población por tipología"></div>
+        <ul class="dash-legend dash-legend-inline">
+          <li><i class="swatch" style="background:#eab308"></i> Mujeres</li>
+          <li><i class="swatch" style="background:#84cc16"></i> Hombres</li>
+        </ul>
+      </article>
+      <article class="dash-card dash-kpi">
+        <h3>Población total</h3>
+        <p id="dashTotalPob" class="dash-kpi-value">—</p>
+      </article>
+      <article class="dash-card" id="dashBarrioCard">
+        <h3>Viviendas por barrio</h3>
+        <div class="dash-chart-row">
+          <div id="dashBarrioChart" class="dash-chart" role="img" aria-label="Viviendas por barrio"></div>
+          <ul id="dashBarrioLegend" class="dash-legend"></ul>
+        </div>
+      </article>
+    </div>
   </aside>
 
   <aside class="legend" id="legendPanel" aria-label="Leyenda">
@@ -145,7 +194,8 @@
         <li><strong>Dibujar un área</strong> para sumar viviendas y residentes de esa zona.</li>
         <li><strong>Barrios (B)</strong>: muestra Centro, Este y Oeste con colores distintos.</li>
         <li><strong>Consultas</strong> (icono de comentario): preguntas rápidas del padrón (barrios, extranjeros, Cañada Real, etc.), sin datos personales.</li>
-        <li><strong>Street View</strong> con el botón de la derecha. En escritorio también puedes cambiar entre <strong>2D/3D</strong>; en móvil se usa solo 2D por rendimiento. El <strong>?</strong> vuelve a abrir esta ayuda.</li>
+        <li><strong>Cuadro de mando</strong> (icono de panel): tipología y barrios; pulsa un segmento para filtrar el mapa. Va oculto para no tapar la vista.</li>
+        <li><strong>Street View</strong> con el botón de la derecha. El mapa arranca en <strong>2D</strong> por rendimiento; en escritorio puedes pasar a <strong>3D</strong> con el botón. En móvil solo hay 2D. El <strong>?</strong> vuelve a abrir esta ayuda.</li>
       </ul>
       <label class="intro-check">
         <input id="introHide" type="checkbox" />
@@ -157,6 +207,6 @@
 
   <script src="https://js.arcgis.com/4.33/"></script>
   <script src="config.js?v=6"></script>
-  <script src="app.js?v=152"></script>
+  <script src="app.js?v=157"></script>
 </body>
 </html>

@@ -81,6 +81,13 @@ require([
   let edificios = [];
   let edificiosPorRc = {};
   let censusPoints = [];
+  let dashRecords = [];
+  let dashFilter = { tipo: null, barrio: null };
+  let dashHoverTipo = null;
+  let dashHoverTimer = null;
+  let dashHoverSeq = 0;
+  let dashRcByTipo = { unifamiliar: {}, plurifamiliar: {} };
+  let barrioGeoms = [];
   let meta = null;
   let unifamiliarLayer = null;
   let plurifamiliarLayer = null;
@@ -773,24 +780,30 @@ require([
     elevationInfo: { mode: "relative-to-scene", offset: 3, unit: "meters" }
   });
 
+  /** Contornos de parcela al pasar el ratón por tipología en el cuadro de mando. */
+  const dashParcelLayer = new GraphicsLayer({
+    title: "Resalte tipología",
+    listMode: "hide",
+    elevationInfo: { mode: "on-the-ground" }
+  });
+
   function isMobileClient() {
     return window.matchMedia("(max-width: 768px)").matches
       || window.matchMedia("(max-width: 980px) and (pointer: coarse)").matches;
   }
 
-  const preferFlatBoot = isMobileClient();
-  document.body.classList.toggle("mobile-2d", preferFlatBoot);
-  if (preferFlatBoot) {
+  // Arranque siempre en 2D (rendimiento). El 3D se crea al pulsar el botón (salvo en móvil).
+  const preferFlatBoot = true;
+  document.body.classList.toggle("mobile-2d", isMobileClient());
+  {
     const loadingP = document.querySelector("#loading p");
     if (loadingP) loadingP.textContent = "Cargando mapa y datos del Portal…";
   }
 
   const map = new Map({
     basemap: basemaps[0],
-    ground: preferFlatBoot ? null : "world-elevation",
-    layers: preferFlatBoot
-      ? [maskLayer, barriosLayer, parcelasLayer, drawLayer, labelLayer, highlightGroundLayer, highlightLayer]
-      : [maskLayer, barriosLayer, parcelasLayer, buildingsLayer, drawLayer, labelLayer, highlightGroundLayer, highlightLayer]
+    ground: null,
+    layers: [maskLayer, barriosLayer, parcelasLayer, dashParcelLayer, drawLayer, labelLayer, highlightGroundLayer, highlightLayer]
   });
 
   const homeCamera = {
@@ -840,14 +853,9 @@ require([
   }
 
   let view;
-  if (preferFlatBoot) {
-    mapView = createMapView("viewDiv");
-    view = mapView;
-    sceneView = null;
-  } else {
-    view = createSceneView("viewDiv");
-    sceneView = view;
-  }
+  mapView = createMapView("viewDiv");
+  view = mapView;
+  sceneView = null;
 
   view.popup.autoCloseEnabled = false;
   // Debajo del punto: al ampliar crece hacia abajo y no tapa la barra de búsqueda.
@@ -899,10 +907,12 @@ require([
   const btnBarrios = document.getElementById("btnBarrios");
   const btnChat = document.getElementById("btnChat");
   const chatPanel = document.getElementById("chatPanel");
+  const btnDash = document.getElementById("btnDash");
+  const dashPanel = document.getElementById("dashPanel");
   let streetMode = false;
 
   function detachChrome() {
-    [homeWidget, btnView, basemapExpand, btnStreet, btnArea, btnChat, btnBarrios, btnHelp].forEach(function (item) {
+    [homeWidget, btnView, basemapExpand, btnStreet, btnArea, btnChat, btnDash, btnBarrios, btnHelp].forEach(function (item) {
       if (item) view.ui.remove(item);
     });
   }
@@ -914,7 +924,7 @@ require([
     basemapExpand.expanded = false;
     const tools = [homeWidget];
     if (!isMobileClient() && btnView) tools.push(btnView);
-    tools.push(basemapExpand, btnStreet, btnArea, btnChat, btnBarrios, btnHelp);
+    tools.push(basemapExpand, btnStreet, btnArea, btnChat, btnDash, btnBarrios, btnHelp);
     view.ui.add(tools.filter(Boolean), "top-right");
   }
 
@@ -1023,7 +1033,9 @@ require([
       identifyFromPointer(event);
     }));
     viewHandles.push(view.watch("stationary", function (stationary) {
-      if (stationary) refreshLabels();
+      if (!stationary) return;
+      refreshLabels();
+      if (dashHoverTipo) paintDashParcelOutlines(dashHoverTipo);
     }));
   }
 
@@ -4280,6 +4292,7 @@ require([
       }
       map.addMany(layers);
       map.reorder(labelLayer, map.layers.length - 1);
+      map.reorder(dashParcelLayer, map.layers.length - 1);
       map.reorder(highlightGroundLayer, map.layers.length - 1);
       map.reorder(highlightLayer, map.layers.length - 1);
       const parcelas = Object.keys(edificiosPorRc).length;
@@ -4298,9 +4311,29 @@ require([
       document.getElementById("statViviendas").textContent = fmt(totalViviendas);
       document.getElementById("statResidentes").textContent = fmt(residentes);
       document.getElementById("statParcelas").textContent = fmt(parcelaCount);
+      dashRecords = split.features.concat(incidenciaFeatures).map(function (feature) {
+        const props = feature.properties || {};
+        const coords = feature.geometry && feature.geometry.coordinates;
+        const tipo = props.tipo === "plurifamiliar" ? "plurifamiliar" : "unifamiliar";
+        const rc = String(props.rc || props.ref || "").trim().toUpperCase().slice(0, 14);
+        return {
+          tipo: tipo,
+          rc: rc.length >= 14 ? rc : "",
+          residentes: Number(props.residentes) || 0,
+          hombres: Number(props.hombres) || 0,
+          mujeres: Number(props.mujeres) || 0,
+          lon: coords ? coords[0] : null,
+          lat: coords ? coords[1] : null,
+          barrio: null
+        };
+      });
+      rebuildDashRcIndex();
       return Promise.all(layers.map(function (layer) { return layer.when(); })).then(function () {
         applyViewStyle();
         refreshLabels();
+        return enrichDashBarrios().then(function () {
+          renderDashboard();
+        });
       });
     });
   }).then(function () {
@@ -4343,6 +4376,621 @@ require([
   introOverlay.addEventListener("click", function (event) {
     if (event.target === introOverlay) hideIntro();
   });
+
+  /* ---- Cuadro de mando (tipología / barrios, filtro de mapa) ---- */
+  const DASH_COLORS = {
+    colectiva: "#ea580c",
+    unifamiliar: "#eab308",
+    mujeres: "#eab308",
+    hombres: "#84cc16",
+    "Barrio Centro": "#0f6f6a",
+    "Barrio Oeste": "#db2777",
+    "Barrio Este": "#d4a574",
+    otro: "#94a3b8"
+  };
+
+  function dashFmt(n) {
+    return Number(n || 0).toLocaleString("es-ES");
+  }
+
+  function pointInBarrioGeom(lon, lat, geom) {
+    if (lon == null || lat == null || !geom || !geom.rings || !geom.rings.length) return false;
+    if (!pointInRing(lon, lat, geom.rings[0])) return false;
+    for (let h = 1; h < geom.rings.length; h++) {
+      if (pointInRing(lon, lat, geom.rings[h])) return false;
+    }
+    return true;
+  }
+
+  function enrichDashBarrios() {
+    if (!dashRecords.length || !barriosLayer) return Promise.resolve();
+    return barriosLayer.load().then(function () {
+      return barriosLayer.queryFeatures({
+        where: "1=1",
+        outFields: ["NOMBRE"],
+        returnGeometry: true,
+        outSpatialReference: { wkid: 4326 }
+      });
+    }).then(function (res) {
+      barrioGeoms = [];
+      (res.features || []).forEach(function (g) {
+        const nombre = String((g.attributes && (g.attributes.NOMBRE || g.attributes.Nombre)) || "").trim();
+        if (!nombre || !g.geometry) return;
+        barrioGeoms.push({
+          nombre: nombre,
+          geometry: g.geometry,
+          extent: g.geometry.extent ? g.geometry.extent.clone() : null
+        });
+      });
+      dashRecords.forEach(function (row) {
+        row.barrio = null;
+        for (let i = 0; i < barrioGeoms.length; i++) {
+          if (pointInBarrioGeom(row.lon, row.lat, barrioGeoms[i].geometry)) {
+            row.barrio = barrioGeoms[i].nombre;
+            break;
+          }
+        }
+      });
+    }).catch(function (err) {
+      console.warn("Barrios del cuadro de mando", err);
+    });
+  }
+
+  function filteredDashRecords() {
+    return dashRecords.filter(function (row) {
+      if (dashFilter.tipo && row.tipo !== dashFilter.tipo) return false;
+      if (dashFilter.barrio && row.barrio !== dashFilter.barrio) return false;
+      return true;
+    });
+  }
+
+  function computeDashStats(rows) {
+    const stats = {
+      uniViv: 0,
+      pluriViv: 0,
+      uniHom: 0,
+      uniMuj: 0,
+      pluriHom: 0,
+      pluriMuj: 0,
+      uniRes: 0,
+      pluriRes: 0,
+      barrios: {}
+    };
+    rows.forEach(function (row) {
+      const res = Number(row.residentes) || 0;
+      const h = Number(row.hombres) || 0;
+      const m = Number(row.mujeres) || 0;
+      if (row.tipo === "plurifamiliar") {
+        stats.pluriViv += 1;
+        stats.pluriHom += h;
+        stats.pluriMuj += m;
+        stats.pluriRes += res;
+      } else {
+        stats.uniViv += 1;
+        stats.uniHom += h;
+        stats.uniMuj += m;
+        stats.uniRes += res;
+      }
+      const b = row.barrio || "Sin barrio";
+      if (!stats.barrios[b]) stats.barrios[b] = { viv: 0, res: 0 };
+      stats.barrios[b].viv += 1;
+      stats.barrios[b].res += res;
+    });
+    stats.totalViv = stats.uniViv + stats.pluriViv;
+    stats.totalPob = stats.uniRes + stats.pluriRes;
+    return stats;
+  }
+
+  function doughnutSvg(segments, activeKey) {
+    const total = segments.reduce(function (s, seg) { return s + (Number(seg.value) || 0); }, 0) || 1;
+    const size = 108;
+    const cx = size / 2;
+    const cy = size / 2;
+    const r = 40;
+    const stroke = 18;
+    const c = 2 * Math.PI * r;
+    let offset = 0;
+    const arcs = segments.map(function (seg) {
+      const value = Number(seg.value) || 0;
+      const len = (value / total) * c;
+      const cls = activeKey
+        ? (seg.key === activeKey ? "dash-seg is-active" : "dash-seg is-dim")
+        : "dash-seg";
+      const circle =
+        "<circle class='" + cls + "' data-key='" + esc(seg.key) + "' cx='" + cx + "' cy='" + cy +
+        "' r='" + r + "' fill='none' stroke='" + seg.color + "' stroke-width='" + stroke +
+        "' stroke-dasharray='" + len.toFixed(2) + " " + (c - len).toFixed(2) +
+        "' stroke-dashoffset='" + (-offset).toFixed(2) + "' transform='rotate(-90 " + cx + " " + cy + ")'></circle>";
+      offset += len;
+      return circle;
+    }).join("");
+    return (
+      "<svg viewBox='0 0 " + size + " " + size + "' aria-hidden='true'>" +
+      "<circle cx='" + cx + "' cy='" + cy + "' r='" + r + "' fill='none' stroke='#eef2f6' stroke-width='" + stroke + "'></circle>" +
+      arcs +
+      "</svg>"
+    );
+  }
+
+  function barsSvg(groups, activeKey) {
+    const max = Math.max(
+      1,
+      groups.reduce(function (m, g) {
+        return Math.max(m, Number(g.mujeres) || 0, Number(g.hombres) || 0);
+      }, 0)
+    );
+    const w = 280;
+    const h = 120;
+    const padL = 8;
+    const padB = 22;
+    const padT = 8;
+    const chartH = h - padB - padT;
+    const groupW = (w - padL * 2) / Math.max(groups.length, 1);
+    const barW = Math.min(22, groupW * 0.28);
+    let html = "<svg viewBox='0 0 " + w + " " + h + "' aria-hidden='true'>";
+    groups.forEach(function (g, i) {
+      const dim = activeKey && g.key !== activeKey;
+      const cls = "dash-bar" + (dim ? " is-dim" : "");
+      const gx = padL + i * groupW + groupW / 2;
+      const hM = ((Number(g.mujeres) || 0) / max) * chartH;
+      const hH = ((Number(g.hombres) || 0) / max) * chartH;
+      const xM = gx - barW - 3;
+      const xH = gx + 3;
+      html +=
+        "<rect class='" + cls + "' data-key='" + esc(g.key) + "' x='" + xM + "' y='" + (padT + chartH - hM) +
+        "' width='" + barW + "' height='" + Math.max(hM, 0) + "' rx='3' fill='" + DASH_COLORS.mujeres + "'></rect>" +
+        "<rect class='" + cls + "' data-key='" + esc(g.key) + "' x='" + xH + "' y='" + (padT + chartH - hH) +
+        "' width='" + barW + "' height='" + Math.max(hH, 0) + "' rx='3' fill='" + DASH_COLORS.hombres + "'></rect>" +
+        "<text x='" + gx + "' y='" + (h - 6) + "' text-anchor='middle' font-size='10' fill='#5c6b7a'>" +
+        esc(g.label) + "</text>";
+    });
+    html += "</svg>";
+    return html;
+  }
+
+  function applyDashMapFilter() {
+    const tipo = dashFilter.tipo;
+    if (unifamiliarLayer) unifamiliarLayer.visible = !tipo || tipo === "unifamiliar";
+    if (plurifamiliarLayer) plurifamiliarLayer.visible = !tipo || tipo === "plurifamiliar";
+    if (incidenciaLayer) incidenciaLayer.visible = !tipo || tipo === "unifamiliar";
+    refreshLabels();
+  }
+
+  function hexToRgb(hex) {
+    const h = String(hex || "").replace("#", "");
+    if (h.length !== 6) return [234, 88, 12];
+    return [
+      parseInt(h.slice(0, 2), 16),
+      parseInt(h.slice(2, 4), 16),
+      parseInt(h.slice(4, 6), 16)
+    ];
+  }
+
+  function rebuildDashRcIndex() {
+    dashRcByTipo = { unifamiliar: {}, plurifamiliar: {} };
+    dashRecords.forEach(function (row) {
+      if (!row.rc || row.rc.length < 14) return;
+      const bucket = row.tipo === "plurifamiliar" ? dashRcByTipo.plurifamiliar : dashRcByTipo.unifamiliar;
+      bucket[row.rc] = true;
+    });
+  }
+
+  function dashParcelSymbol(hex) {
+    const rgb = hexToRgb(hex);
+    return {
+      type: "simple-fill",
+      color: [rgb[0], rgb[1], rgb[2], 0.38],
+      outline: {
+        color: [rgb[0], rgb[1], rgb[2], 1],
+        width: 2.2
+      }
+    };
+  }
+
+  function clearDashTipoPreview() {
+    if (dashHoverTimer) {
+      clearTimeout(dashHoverTimer);
+      dashHoverTimer = null;
+    }
+    dashHoverSeq += 1;
+    dashHoverTipo = null;
+    dashParcelLayer.removeAll();
+    if (unifamiliarLayer) unifamiliarLayer.opacity = 1;
+    if (plurifamiliarLayer) plurifamiliarLayer.opacity = 1;
+    if (incidenciaLayer) incidenciaLayer.opacity = 1;
+  }
+
+  function previewDashTipo(tipo) {
+    if (tipo !== "unifamiliar" && tipo !== "plurifamiliar") {
+      clearDashTipoPreview();
+      return;
+    }
+    dashHoverTipo = tipo;
+    if (dashHoverTimer) clearTimeout(dashHoverTimer);
+    dashHoverTimer = setTimeout(function () {
+      paintDashParcelOutlines(tipo);
+    }, 70);
+  }
+
+  function dashExtentLonLat() {
+    if (!view || !view.extent) return null;
+    let ext = view.extent;
+    try {
+      if (ext.spatialReference && ext.spatialReference.isWebMercator) {
+        ext = webMercatorUtils.webMercatorToGeographic(ext);
+      }
+    } catch (err) { /* keep as-is */ }
+    // Margen para no cortar parcelas en el borde.
+    const padX = (ext.xmax - ext.xmin) * 0.02;
+    const padY = (ext.ymax - ext.ymin) * 0.02;
+    return {
+      xmin: ext.xmin - padX,
+      ymin: ext.ymin - padY,
+      xmax: ext.xmax + padX,
+      ymax: ext.ymax + padY
+    };
+  }
+
+  function collectDashRcsInView(tipo) {
+    const box = dashExtentLonLat();
+    const rcMap = dashRcByTipo[tipo] || {};
+    const list = [];
+    const seen = {};
+    if (!box) {
+      Object.keys(rcMap).forEach(function (rc) { list.push(rc); });
+      return list;
+    }
+    dashRecords.forEach(function (row) {
+      if (row.tipo !== tipo || !row.rc || !rcMap[row.rc]) return;
+      if (row.lon == null || row.lat == null) return;
+      if (row.lon < box.xmin || row.lon > box.xmax || row.lat < box.ymin || row.lat > box.ymax) return;
+      if (seen[row.rc]) return;
+      seen[row.rc] = true;
+      list.push(row.rc);
+    });
+    return list;
+  }
+
+  function appendDashParcelGraphics(features, rcMap, symbol, seen, graphics) {
+    (features || []).forEach(function (feature) {
+      const rc = String((feature.attributes && feature.attributes.REFCAT) || "")
+        .trim()
+        .toUpperCase()
+        .slice(0, 14);
+      if (!rc || !rcMap[rc] || seen[rc]) return;
+      seen[rc] = true;
+      graphics.push(new Graphic({
+        geometry: feature.geometry,
+        symbol: symbol
+      }));
+    });
+  }
+
+  function queryParcelsByRcList(rcs, symbol, rcMap, seq, tipo) {
+    const chunkSize = 60;
+    const graphics = [];
+    const seen = {};
+    let index = 0;
+
+    function flush() {
+      if (seq !== dashHoverSeq || dashHoverTipo !== tipo) return;
+      dashParcelLayer.removeAll();
+      if (graphics.length) dashParcelLayer.addMany(graphics);
+    }
+
+    function next() {
+      if (seq !== dashHoverSeq || dashHoverTipo !== tipo) return Promise.resolve();
+      if (index >= rcs.length) {
+        flush();
+        return Promise.resolve();
+      }
+      const chunk = rcs.slice(index, index + chunkSize);
+      index += chunkSize;
+      const where = chunk.map(function (rc) {
+        return "REFCAT='" + String(rc).replace(/'/g, "''") + "'";
+      }).join(" OR ");
+      return parcelasLayer.queryFeatures({
+        where: where,
+        outFields: ["REFCAT"],
+        returnGeometry: true,
+        outSpatialReference: view.spatialReference
+      }).then(function (res) {
+        if (seq !== dashHoverSeq || dashHoverTipo !== tipo) return;
+        appendDashParcelGraphics(res.features, rcMap, symbol, seen, graphics);
+        flush();
+        return next();
+      });
+    }
+    return next();
+  }
+
+  function queryParcelsByExtentPaged(rcMap, symbol, seq, tipo) {
+    const pageSize = 2000;
+    let start = 0;
+    const graphics = [];
+    const seen = {};
+    const extent = view.extent.clone();
+
+    function flush() {
+      if (seq !== dashHoverSeq || dashHoverTipo !== tipo) return;
+      dashParcelLayer.removeAll();
+      if (graphics.length) dashParcelLayer.addMany(graphics);
+    }
+
+    function next() {
+      if (seq !== dashHoverSeq || dashHoverTipo !== tipo) return Promise.resolve();
+      return parcelasLayer.queryFeatures({
+        geometry: extent,
+        spatialRelationship: "intersects",
+        outFields: ["REFCAT"],
+        returnGeometry: true,
+        outSpatialReference: view.spatialReference,
+        start: start,
+        num: pageSize
+      }).then(function (res) {
+        if (seq !== dashHoverSeq || dashHoverTipo !== tipo) return;
+        const feats = res.features || [];
+        appendDashParcelGraphics(feats, rcMap, symbol, seen, graphics);
+        flush();
+        if (feats.length < pageSize || start > 100000) return;
+        start += pageSize;
+        return next();
+      }).catch(function () {
+        // Algunos servicios no paginan: un solo tiro amplio.
+        return parcelasLayer.queryFeatures({
+          geometry: extent,
+          spatialRelationship: "intersects",
+          outFields: ["REFCAT"],
+          returnGeometry: true,
+          outSpatialReference: view.spatialReference,
+          resultRecordCount: 20000
+        }).then(function (res) {
+          if (seq !== dashHoverSeq || dashHoverTipo !== tipo) return;
+          appendDashParcelGraphics(res.features, rcMap, symbol, seen, graphics);
+          flush();
+        });
+      });
+    }
+    return next();
+  }
+
+  function paintDashParcelOutlines(tipo) {
+    const seq = ++dashHoverSeq;
+    const hex = tipo === "plurifamiliar" ? DASH_COLORS.colectiva : DASH_COLORS.unifamiliar;
+    const rcMap = dashRcByTipo[tipo] || {};
+    const symbol = dashParcelSymbol(hex);
+
+    // Atenuar puntos para que destaquen los contornos de parcela.
+    if (unifamiliarLayer) unifamiliarLayer.opacity = tipo === "unifamiliar" ? 0.35 : 0.12;
+    if (plurifamiliarLayer) plurifamiliarLayer.opacity = tipo === "plurifamiliar" ? 0.35 : 0.12;
+    if (incidenciaLayer) incidenciaLayer.opacity = tipo === "unifamiliar" ? 0.3 : 0.1;
+
+    if (!parcelasLayer || !view || !view.extent) {
+      dashParcelLayer.removeAll();
+      return;
+    }
+
+    const rcsInView = collectDashRcsInView(tipo);
+    // Por REFCAT cuando el número es manejable; si no, paginar por extensión.
+    const job = rcsInView.length > 0 && rcsInView.length <= 2500
+      ? queryParcelsByRcList(rcsInView, symbol, rcMap, seq, tipo)
+      : queryParcelsByExtentPaged(rcMap, symbol, seq, tipo);
+
+    job.catch(function (err) {
+      console.warn("Resalte de parcelas", err);
+    });
+  }
+
+  function dashTipoKeyFromEventTarget(target) {
+    if (!target || !target.closest) return null;
+    const el = target.closest("[data-tipo], .dash-seg[data-key], .dash-bar[data-key]");
+    if (!el) return null;
+    const key = el.getAttribute("data-tipo") || el.getAttribute("data-key");
+    if (key === "unifamiliar" || key === "plurifamiliar") return key;
+    return null;
+  }
+
+  function zoomDashBarrio(nombre) {
+    const hit = barrioGeoms.find(function (b) { return b.nombre === nombre; });
+    if (!hit || !hit.extent || !view) return;
+    view.goTo(hit.extent.expand(1.15), { duration: 900 }).catch(function () {});
+    if (barriosLayer && !barriosLayer.visible) {
+      barriosLayer.visible = true;
+      syncBarriosButton();
+    }
+  }
+
+  function setDashFilter(next) {
+    dashFilter = {
+      tipo: next && next.tipo != null ? next.tipo : dashFilter.tipo,
+      barrio: next && next.barrio != null ? next.barrio : dashFilter.barrio
+    };
+    if (next && next.toggleTipo) {
+      dashFilter.tipo = dashFilter.tipo === next.toggleTipo ? null : next.toggleTipo;
+    }
+    if (next && next.toggleBarrio) {
+      dashFilter.barrio = dashFilter.barrio === next.toggleBarrio ? null : next.toggleBarrio;
+      if (dashFilter.barrio) zoomDashBarrio(dashFilter.barrio);
+    }
+    applyDashMapFilter();
+    renderDashboard();
+  }
+
+  function clearDashFilter() {
+    dashFilter = { tipo: null, barrio: null };
+    clearDashTipoPreview();
+    applyDashMapFilter();
+    renderDashboard();
+  }
+
+  function renderDashboard() {
+    if (!dashPanel) return;
+    const rows = filteredDashRecords();
+    const base = computeDashStats(dashRecords);
+    const stats = computeDashStats(rows);
+    const activeTipo = dashFilter.tipo;
+    const activeBarrio = dashFilter.barrio;
+    // Gráficos de tipología con el total (para poder reactivar el otro tipo);
+    // KPIs y barrios reflejan el filtro activo.
+    const tipoSource = activeBarrio ? stats : base;
+
+    const tipoSegs = [
+      { key: "plurifamiliar", label: "Colectiva", value: tipoSource.pluriViv, color: DASH_COLORS.colectiva },
+      { key: "unifamiliar", label: "Unifamiliar", value: tipoSource.uniViv, color: DASH_COLORS.unifamiliar }
+    ];
+    const tipoChart = document.getElementById("dashTipoChart");
+    const tipoLegend = document.getElementById("dashTipoLegend");
+    if (tipoChart) tipoChart.innerHTML = doughnutSvg(tipoSegs, activeTipo);
+    if (tipoLegend) {
+      tipoLegend.innerHTML = tipoSegs.map(function (seg) {
+        const dim = activeTipo && seg.key !== activeTipo ? " is-dim" : "";
+        return (
+          "<li class='" + dim.trim() + "' data-tipo='" + esc(seg.key) + "'>" +
+          "<i class='swatch' style='background:" + seg.color + "'></i>" +
+          "<span>" + esc(seg.label) + "</span><b>" + dashFmt(seg.value) + "</b></li>"
+        );
+      }).join("");
+    }
+
+    const totalVivEl = document.getElementById("dashTotalViv");
+    const totalPobEl = document.getElementById("dashTotalPob");
+    if (totalVivEl) totalVivEl.textContent = dashFmt(stats.totalViv);
+    if (totalPobEl) totalPobEl.textContent = dashFmt(stats.totalPob);
+
+    const pobGroups = [
+      {
+        key: "plurifamiliar",
+        label: "Colectiva",
+        mujeres: tipoSource.pluriMuj,
+        hombres: tipoSource.pluriHom
+      },
+      {
+        key: "unifamiliar",
+        label: "Unifamiliar",
+        mujeres: tipoSource.uniMuj,
+        hombres: tipoSource.uniHom
+      }
+    ];
+    const pobChart = document.getElementById("dashPobChart");
+    if (pobChart) pobChart.innerHTML = barsSvg(pobGroups, activeTipo);
+
+    const barrioSource = activeTipo ? stats : base;
+    const barrioOrder = ["Barrio Centro", "Barrio Oeste", "Barrio Este"];
+    const barrioSegs = [];
+    barrioOrder.forEach(function (name) {
+      const hit = barrioSource.barrios[name];
+      if (!hit) return;
+      barrioSegs.push({
+        key: name,
+        label: name.replace(/^Barrio\s+/i, ""),
+        value: hit.viv,
+        color: DASH_COLORS[name] || DASH_COLORS.otro
+      });
+    });
+    Object.keys(barrioSource.barrios).forEach(function (name) {
+      if (barrioOrder.indexOf(name) >= 0) return;
+      barrioSegs.push({
+        key: name,
+        label: name.replace(/^Barrio\s+/i, "") || name,
+        value: barrioSource.barrios[name].viv,
+        color: DASH_COLORS.otro
+      });
+    });
+    const barrioChart = document.getElementById("dashBarrioChart");
+    const barrioLegend = document.getElementById("dashBarrioLegend");
+    if (barrioChart) barrioChart.innerHTML = doughnutSvg(barrioSegs, activeBarrio);
+    if (barrioLegend) {
+      barrioLegend.innerHTML = barrioSegs.map(function (seg) {
+        const dim = activeBarrio && seg.key !== activeBarrio ? " is-dim" : "";
+        return (
+          "<li class='" + dim.trim() + "' data-barrio='" + esc(seg.key) + "'>" +
+          "<i class='swatch' style='background:" + seg.color + "'></i>" +
+          "<span>" + esc(seg.label) + "</span><b>" + dashFmt(seg.value) + "</b></li>"
+        );
+      }).join("");
+    }
+
+    const note = document.getElementById("dashFilterNote");
+    const btnClear = document.getElementById("btnDashClear");
+    const parts = [];
+    if (activeTipo) parts.push(activeTipo === "plurifamiliar" ? "Colectiva" : "Unifamiliar");
+    if (activeBarrio) parts.push(activeBarrio.replace(/^Barrio\s+/i, ""));
+    if (note) {
+      if (parts.length) {
+        note.hidden = false;
+        note.textContent = "Filtro activo: " + parts.join(" · ") + " → " + dashFmt(stats.totalViv) + " viv. / " + dashFmt(stats.totalPob) + " res.";
+      } else {
+        note.hidden = true;
+        note.textContent = "";
+      }
+    }
+    if (btnClear) btnClear.hidden = !parts.length;
+  }
+
+  function setDashOpen(open) {
+    if (!dashPanel || !btnDash) return;
+    if (open && typeof setChatOpen === "function") setChatOpen(false);
+    dashPanel.hidden = !open;
+    btnDash.classList.toggle("is-active", open);
+    btnDash.setAttribute("aria-pressed", open ? "true" : "false");
+    document.body.classList.toggle("dash-open", !!open);
+    if (open) renderDashboard();
+    else clearDashTipoPreview();
+  }
+
+  if (dashPanel) {
+    dashPanel.addEventListener("click", function (event) {
+      const tipoEl = event.target.closest("[data-tipo]");
+      if (tipoEl && tipoEl.getAttribute("data-tipo")) {
+        clearDashTipoPreview();
+        setDashFilter({ toggleTipo: tipoEl.getAttribute("data-tipo") });
+        return;
+      }
+      const barrioEl = event.target.closest("[data-barrio]");
+      if (barrioEl && barrioEl.getAttribute("data-barrio")) {
+        clearDashTipoPreview();
+        setDashFilter({ toggleBarrio: barrioEl.getAttribute("data-barrio") });
+        return;
+      }
+      const seg = event.target.closest(".dash-seg[data-key], .dash-bar[data-key]");
+      if (seg) {
+        const key = seg.getAttribute("data-key");
+        clearDashTipoPreview();
+        if (key === "unifamiliar" || key === "plurifamiliar") {
+          setDashFilter({ toggleTipo: key });
+        } else if (key) {
+          setDashFilter({ toggleBarrio: key });
+        }
+      }
+    });
+    dashPanel.addEventListener("pointerover", function (event) {
+      const key = dashTipoKeyFromEventTarget(event.target);
+      if (key) previewDashTipo(key);
+    });
+    dashPanel.addEventListener("pointerout", function (event) {
+      const leaving = dashTipoKeyFromEventTarget(event.target);
+      if (!leaving) return;
+      const nextKey = dashTipoKeyFromEventTarget(event.relatedTarget);
+      if (nextKey) {
+        if (nextKey !== leaving) previewDashTipo(nextKey);
+        return;
+      }
+      clearDashTipoPreview();
+    });
+  }
+  const btnDashClose = document.getElementById("btnDashClose");
+  const btnDashClear = document.getElementById("btnDashClear");
+  if (btnDash) {
+    btnDash.addEventListener("click", function () {
+      setDashOpen(dashPanel.hidden);
+    });
+  }
+  if (btnDashClose) {
+    btnDashClose.addEventListener("click", function () { setDashOpen(false); });
+  }
+  if (btnDashClear) {
+    btnDashClear.addEventListener("click", function () { clearDashFilter(); });
+  }
 
   /* ---- Chatbot de prueba (agregados prefijados, sin PII) ---- */
   const chatLog = document.getElementById("chatLog");
@@ -4541,6 +5189,7 @@ require([
 
   function setChatOpen(open) {
     if (!chatPanel || !btnChat) return;
+    if (open && typeof setDashOpen === "function") setDashOpen(false);
     chatPanel.hidden = !open;
     btnChat.classList.toggle("is-active", open);
     btnChat.setAttribute("aria-pressed", open ? "true" : "false");

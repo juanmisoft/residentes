@@ -380,6 +380,156 @@ body.street-mode .esri-view-surface {
 
 .chat-send:hover { filter: brightness(1.05); }
 
+.dash-panel {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 28px;
+  z-index: 4;
+  max-width: 1180px;
+  margin: 0 auto;
+  max-height: min(42vh, 420px);
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px 14px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 10px 28px rgba(20, 32, 48, 0.16);
+}
+.dash-panel[hidden] { display: none !important; }
+.dash-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.dash-head-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.dash-filter-note {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #e7f3f2;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+.dash-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 0.7fr 1.3fr 0.7fr 1.2fr;
+  gap: 10px;
+  overflow: auto;
+  min-height: 0;
+  padding-bottom: 2px;
+}
+.dash-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+.dash-card h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  line-height: 1.3;
+}
+.dash-kpi {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  text-align: center;
+}
+.dash-kpi-value {
+  margin: 0;
+  font-size: clamp(22px, 2.4vw, 32px);
+  font-weight: 800;
+  color: #c2410c;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.dash-chart-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dash-chart {
+  flex: 0 0 auto;
+  width: 108px;
+  height: 108px;
+}
+.dash-chart svg { width: 100%; height: 100%; display: block; }
+.dash-chart .dash-seg {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.dash-chart .dash-seg:hover { opacity: 0.85; }
+.dash-chart .dash-seg.is-dim { opacity: 0.28; }
+.dash-chart .dash-seg.is-active { opacity: 1; filter: drop-shadow(0 0 2px rgba(15, 111, 106, 0.55)); }
+.dash-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ink);
+  min-width: 0;
+}
+.dash-legend li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.dash-legend li.is-dim { opacity: 0.4; }
+.dash-legend .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+.dash-legend b {
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+  padding-left: 6px;
+}
+.dash-legend-inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  gap: 10px;
+}
+.dash-legend-inline li { cursor: default; }
+.dash-bars {
+  height: 120px;
+  width: 100%;
+}
+.dash-bars svg { width: 100%; height: 100%; display: block; }
+.dash-bars .dash-bar {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.dash-bars .dash-bar.is-dim { opacity: 0.28; }
+.dash-bars .dash-bar:hover { opacity: 0.9; }
+.btn-dash.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+body.dash-open .legend {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .btn-chat.is-active {
   color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--accent);
@@ -901,9 +1051,24 @@ body.mobile-2d .view-toggle {
   }
   body.popup-open .legend,
   body.popup-open .area-panel,
-  body.popup-open .chat-panel {
+  body.popup-open .chat-panel,
+  body.popup-open .dash-panel {
     visibility: hidden;
     pointer-events: none;
+  }
+  .dash-panel {
+    left: max(8px, env(safe-area-inset-left));
+    right: max(8px, env(safe-area-inset-right));
+    bottom: max(8px, env(safe-area-inset-bottom));
+    max-height: min(48vh, 460px);
+  }
+  .dash-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .dash-card:nth-child(3),
+  .dash-card:nth-child(5) {
+    grid-column: 1 / -1;
   }
   .floors details[open] > .floor-dwellings {
     max-height: var(--floor-open-max, min(28vh, 220px));
@@ -1013,6 +1178,18 @@ body.mobile-2d .view-toggle {
     max-height: min(78vh, 560px);
     border-radius: 14px 14px 10px 10px;
   }
+  .dash-panel {
+    max-height: min(58vh, 520px);
+    border-radius: 14px 14px 10px 10px;
+  }
+  .dash-grid {
+    grid-template-columns: 1fr;
+  }
+  .dash-card:nth-child(3),
+  .dash-card:nth-child(5) {
+    grid-column: auto;
+  }
+  .dash-kpi-value { font-size: 26px; }
   .chat-form input { height: 40px; font-size: 16px; }
   .chat-send { height: 40px; padding: 0 12px; }
 }
